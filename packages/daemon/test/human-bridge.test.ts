@@ -101,6 +101,9 @@ describe("native human bridge", () => {
     expect(queue.transitionLog.hasOwnerNotificationReceipt(q.qitemId, "new")).toBe(true);
     expect(queue.transitionLog.hasOwnerNotificationReceipt(q.qitemId, "old")).toBe(false);
     expect((db.prepare("SELECT acknowledged FROM human_bridge_native_dispatch WHERE native_decision_id = 'old'").get() as { acknowledged: number }).acknowledged).toBe(2);
+    expect(await delivery.deliver({ kind: "outbound_decision", decisionId: "old", op: OUTBOUND_OP,
+      entityBindingRef: actor.session, payload: { qitemId: q.qitemId, notificationKey: "old" } })).toEqual({ ok: true });
+    expect(queue.transitionLog.hasOwnerNotificationReceipt(q.qitemId, "old")).toBe(false);
   });
   it("closes an informational human item only after delivery and preserves human-authored agent tasks", async () => {
     app(); const box = new HumanBridgeMailbox(db, { home, queue });

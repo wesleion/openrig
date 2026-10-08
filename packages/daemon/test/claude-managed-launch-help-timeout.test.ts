@@ -35,12 +35,12 @@ function fixture(script: string) {
 
 async function prepare(script: string, mode = "auto", target: { cwd?: string } = {}) {
   const f = fixture(script);
-  const started = Date.now();
+  const started = performance.now();
   try {
     await f.managed.prepare({ nodeId: "node", ...target }, mode);
-    return { ok: true as const, ms: Date.now() - started, helpCalls: f.helpCalls() };
+    return { ok: true as const, ms: performance.now() - started, helpCalls: f.helpCalls() };
   } catch (error) {
-    return { ok: false as const, ms: Date.now() - started, helpCalls: f.helpCalls(), message: (error as Error).message };
+    return { ok: false as const, ms: performance.now() - started, helpCalls: f.helpCalls(), message: (error as Error).message };
   }
 }
 

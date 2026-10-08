@@ -20,8 +20,10 @@ export class HumanBridgeMailbox {
     if (!input?.qitemId) throw new HumanDecisionError("notification_item_required", 400, "Native HTTP notifications require a queue item");
     const qitemId = input.qitemId;
     return this.db.transaction(() => {
-      const prior = this.db.prepare("SELECT decision_id FROM human_bridge_native_dispatch WHERE bridge_id = ? AND native_decision_id = ?").get(bridge.id, decision.decisionId) as { decision_id: string } | undefined;
-      if (prior) return !!this.db.prepare("SELECT 1 FROM human_bridge_dispatch WHERE bridge_id = ? AND decision_id = ? AND status = 'delivered'").get(bridge.id, prior.decision_id);
+      const prior = this.db.prepare("SELECT decision_id, acknowledged FROM human_bridge_native_dispatch WHERE bridge_id = ? AND native_decision_id = ?").get(bridge.id, decision.decisionId) as { decision_id: string; acknowledged: number } | undefined;
+      // A replay of a settled predecessor must not re-enter the pending buffer.
+      // Its ledger retains the delivered/superseded distinction.
+      if (prior) return prior.acknowledged > 0 || !!this.db.prepare("SELECT 1 FROM human_bridge_dispatch WHERE bridge_id = ? AND decision_id = ? AND status = 'delivered'").get(bridge.id, prior.decision_id);
       const item = this.native?.queue.getById(qitemId);
       if (!item) throw new HumanDecisionError("qitem_not_found", 404, "Native notification item is missing");
       const asked = [bridge.humanAddress, ...bridge.legacyAliases].includes(item.destinationSession);
