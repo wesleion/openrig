@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const serveMock = vi.fn();
 const createDaemonMock = vi.fn();
-const serverMock = { prependListener: vi.fn() };
+const serverMock = { prependListener: vi.fn(), on: vi.fn() };
 let signalListenersBefore: { SIGINT: Function[]; SIGTERM: Function[] };
 
 vi.mock("@hono/node-server", () => ({

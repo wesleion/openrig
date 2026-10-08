@@ -1,4 +1,5 @@
 import type { NativeProcessLister } from "./native-process-lineage.js";
+import { existsSync } from "node:fs";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -79,6 +80,7 @@ export interface SeatRefusal {
     | "unmanaged_session_collision"
     | "startup_context_missing"
     | "startup_context_malformed"
+    | "startup_context_stale"
     | "startup_context_runtime_mismatch"
     | "runtime_adapter_missing"
     | "launch_unavailable"
@@ -972,6 +974,11 @@ export class SeatLifecycleService {
       noOps: [],
       diagnostics: [],
     };
+    const missing = entries.find(entry => entry.category === "runtime_resource" && !existsSync(entry.absolutePath));
+    if (missing) {
+      return { ok: false, refusal: { ok: false, code: "startup_context_stale",
+        message: `Saved startup context references missing ${missing.effectiveId}: ${missing.absolutePath}. Existing session was preserved. Restore the file or rebuild the rig with rig down/up after saving its work.` } };
+    }
     const hash = createHash("sha256")
       .update(JSON.stringify([row.projection_entries_json, row.resolved_files_json, row.startup_actions_json, row.runtime]))
       .digest("hex");

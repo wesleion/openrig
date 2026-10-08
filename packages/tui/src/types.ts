@@ -79,6 +79,7 @@ export interface HostNode {
   /** Stable transport key (`local` for this daemon); separate from display identity. */
   id?: string;
   name: string;
+  displayName?: string;
   reachable: boolean;
   rigs: RigNode[];
 }

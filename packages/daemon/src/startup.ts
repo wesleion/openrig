@@ -148,6 +148,7 @@ import { legacyProviderUsageDirectory, providerUsageDirectory } from "./domain/t
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
+import { resolveSeatCodexHome } from "./domain/seat-account-home.js";
 import nodePath from "node:path";
 // Slice 11 (release-0.3.1 workflow-spec-folder-discovery) — adds
 // status + error_message columns to workflow_specs so the scanner
@@ -775,6 +776,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
   const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
   const codexAdapter = new CodexRuntimeAdapter({ prepareTeamWorkspace, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs") });
+  codexAdapter.setSeatHomeResolver(binding => resolveSeatCodexHome(binding.tmuxSession, daemonHome));
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
   const piAdapter = new PiRuntimeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m) }, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath });
@@ -2459,12 +2461,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // no drivers) — `rig slack status` names what is missing.
   const { GatewaySubsystem } = await import("./domain/gateway/gateway-subsystem.js");
   const { buildSlackGatewayWire, makeHumanReplyResolver } = await import("./domain/gateway/slack/slack-subsystem.js");
+  const { HumanDecisionService } = await import("./domain/human-decision-service.js");
+  const { buildHumanBridgeDelivery } = await import("./domain/gateway/human-bridge-delivery.js");
+  const humanBridgeDelivery = buildHumanBridgeDelivery(OPENRIG_HOME, queueRepoInstance);
+  const humanDecisions = new HumanDecisionService(db, queueRepoInstance,
+    makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract));
+  deps.humanDecisionService = humanDecisions;
+  await humanDecisions.recover();
   const gatewaySubsystem = new GatewaySubsystem({
     home: OPENRIG_HOME,
     wire: () => buildSlackGatewayWire({
       home: OPENRIG_HOME,
+      alternateDelivery: humanBridgeDelivery,
       queueRepo: queueRepoInstance,
       resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract),
+      answerHumanDecision: input => humanDecisions.answer(input.qitemId,
+        { session: input.actorSession, scope: "slack" },
+        { requestId: input.requestId, decision: input.decision,
+          answers: input.questionId && input.optionId ? { [input.questionId]: input.optionId } : undefined }),
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),

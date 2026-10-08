@@ -27,6 +27,8 @@ async function until(predicate: () => boolean) {
 describe.skipIf(!hasTmux || process.platform === "win32")("classic Claude interactive launch", () => {
   it("checks assignment, subshell/export and sourced-file alias/function effects", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-shell-forms-"));
+    // Ubuntu's system bashrc otherwise prints a sudo banner for a fresh HOME.
+    fs.writeFileSync(path.join(root, ".sudo_as_admin_successful"), "");
     const rc = path.join(root, "bashrc"), script = path.join(root, "launch");
     const effects: Record<string, string> = {};
     try {

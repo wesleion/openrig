@@ -29,6 +29,7 @@ import { rosterCommand } from "./commands/roster.js";
 import { psCommand } from "./commands/ps.js";
 import { hostCommand } from "./commands/host.js";
 import { gatewayCommand } from "./commands/gateway.js";
+import { bridgeCommand } from "./commands/bridge.js";
 import type { GatewayCommandDeps } from "./commands/gateway.js";
 import { parkedCommand } from "./commands/parked.js";
 import { mcpCommand } from "./commands/mcp.js";
@@ -180,6 +181,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(restoreCommand(depsOverride?.restoreDeps));
   program.addCommand(crashCartCommand());
   program.addCommand(gatewayCommand(depsOverride?.gatewayDeps));
+  program.addCommand(bridgeCommand());
   program.addCommand(parkedCommand());
   program.addCommand(exportCommand(depsOverride?.exportDeps));
   program.addCommand(importCommand(depsOverride?.importDeps));

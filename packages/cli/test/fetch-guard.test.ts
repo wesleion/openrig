@@ -42,11 +42,24 @@ describe("fetch guard — allowlist by shape, fail-closed, three-sided", () => {
     await expect(fetch("http://127.0.0.1:8080/anything")).rejects.toThrow(/FETCH GUARD/i);
   });
 
-  it("ESCAPE HATCH: allowFetchTarget PERMITS a fixed low-port fixture (the guard delegates; a real ECONNREFUSED is NOT the guard)", async () => {
-    allowFetchTarget("http://127.0.0.1:8123");
-    const err = await fetch("http://127.0.0.1:8123/x").then(() => null).catch((e) => e as Error);
-    expect(err).not.toBeNull();
-    expect(String(err?.message ?? "")).not.toMatch(/FETCH GUARD/); // permitted → real fetch's connection error, not the guard
+  it("ESCAPE HATCH: allowFetchTarget PERMITS an owned low-port fixture", async () => {
+    // A fixed port may already host a real local service. Bind the fixture first.
+    let server: http.Server | undefined, port = 21000;
+    for (; port < 21050; port++) {
+      const candidate = http.createServer((_req, res) => res.end("owned-fixture"));
+      const bound = await new Promise<boolean>((resolve, reject) => {
+        candidate.once("error", (error: NodeJS.ErrnoException) => error.code === "EADDRINUSE" ? resolve(false) : reject(error));
+        candidate.listen(port, "127.0.0.1", () => resolve(true));
+      });
+      if (bound) { server = candidate; break; }
+    }
+    if (!server) throw new Error("No free low port available for the owned guard fixture");
+    try {
+      const origin = `http://127.0.0.1:${port}`;
+      await expect(fetch(origin)).rejects.toThrow(/FETCH GUARD/);
+      allowFetchTarget(origin);
+      expect(await (await fetch(origin)).text()).toBe("owned-fixture");
+    } finally { await new Promise<void>((resolve, reject) => server!.close(e => e ? reject(e) : resolve())); }
   });
 
   it("a registered / loopback-ephemeral fixture does NOT widen the allowlist to the daemon", async () => {

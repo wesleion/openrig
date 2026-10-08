@@ -447,7 +447,7 @@ export async function hydrateSnapshot(
   const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig");
   const focusedTopology = !!viewContext && wantsTopologyScope && viewContext.viewTab !== "pulse";
   const broadReads = !readingOnly && !focusedTopology && !wantsConnections;
-  const healthRequested = broadReads || viewContext?.viewTab === "health";
+  const healthRequested = broadReads || wantsTopologyScope || viewContext?.viewTab === "health";
   const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
 
   const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead] = await Promise.all([
@@ -583,9 +583,12 @@ export async function hydrateSnapshot(
     }
   }
   const aggHosts = agg?.hosts ?? [];
+  const hostNames = wantsTopologyScope && typeof client.hostNames === "function"
+    ? await safe<{ ownName?: string }>("host-names", () => client.hostNames()) : null;
   const localHost: HostNode = {
     id: "local",
     name: instanceHealth?.selfHostId?.trim() || "local",
+    displayName: hostNames?.ownName?.trim() || undefined,
     reachable: true,
     rigs,
   };

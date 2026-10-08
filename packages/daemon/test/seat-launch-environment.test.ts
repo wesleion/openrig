@@ -26,6 +26,8 @@ function fixture() {
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, "current bin's"); const userBin = path.join(root, "user-bin");
   for (const dir of [bin, userBin, path.join(root, "workspace"), path.join(root, "home")]) mkdirSync(dir);
+  // Keep the Ubuntu system bashrc's first-use sudo banner outside fixture stdout.
+  writeFileSync(path.join(root, "home", ".sudo_as_admin_successful"), "");
   const writeExe = (file: string, body: string) => writeFileSync(file, body, { mode: 0o700 });
   writeExe(path.join(userBin, "rig"), "#!/bin/sh\necho wrong-rig\n");
   writeExe(path.join(userBin, "codex"), "#!/bin/sh\necho wrong-codex\n");

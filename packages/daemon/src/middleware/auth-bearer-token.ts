@@ -242,7 +242,6 @@ export async function assertBindAuthInvariant(opts: {
   bearerToken: string | null;
 }): Promise<void> {
   if (isLoopbackBind(opts.host)) return;
-  if (isTailscaleBind(opts.host)) return;
 
   let resolvedIp: string | null = null;
   // Hostname (non-IP literal) — resolve and re-check.
@@ -250,15 +249,13 @@ export async function assertBindAuthInvariant(opts: {
     resolvedIp = await resolveToIpOrNull(opts.host);
     if (resolvedIp) {
       if (isLoopbackBind(resolvedIp)) return;
-      if (isTailscaleBind(resolvedIp)) return;
     }
   }
 
   if (opts.bearerToken && opts.bearerToken.length > 0) return;
   throw new AuthBearerTokenStartupError(
-    `daemon refusing to start: bind host '${opts.host}'${resolvedIp ? ` (resolves to ${resolvedIp})` : ""} is not loopback or tailscale, ` +
+    `daemon refusing to start: bind host '${opts.host}'${resolvedIp ? ` (resolves to ${resolvedIp})` : ""} is not loopback, ` +
       `and auth.bearerToken (env OPENRIG_AUTH_BEARER_TOKEN) is empty. ` +
-      `Either: (a) bind to 127.0.0.1 / localhost, (b) bind to a tailscale interface (100.64.0.0/10 IPv4 or fd7a:115c:a1e0::/48 IPv6), ` +
-      `or (c) set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before starting the daemon.`,
+      `Bind to 127.0.0.1 / localhost, or set OPENRIG_AUTH_BEARER_TOKEN before starting the daemon. Tailscale writes also require credentials.`,
   );
 }

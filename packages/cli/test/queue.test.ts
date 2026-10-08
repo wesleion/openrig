@@ -1884,4 +1884,22 @@ describe("P3 — authored-summary teaching layer (advisory + --summary hint)", (
     const summaryOpt = createCmd.options.find((o) => o.long === "--summary")!;
     expect(summaryOpt.description).toMatch(TEACHES_WHERE);
   });
+  it("queue answer posts stable question and option IDs with the displayed revision", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    await program.parseAsync(["queue", "answer", "ask-1", "--question", "q1", "--option", "yes", "--request-id", "tg-1-2-1", "--expected-revision", "3", "--json"], { from: "user" });
+    expect(calls).toContainEqual({ method: "POST", path: "/api/queue/ask-1/answer", body: { requestId: "tg-1-2-1", expectedRevision: 3, answers: { q1: "yes" } } });
+  });
+  it("queue answer refuses conflicting input modes before HTTP", async () => {
+    const { deps, calls } = makeDeps();
+    await createProgram({ queueDeps: deps }).parseAsync(["queue", "answer", "ask-1", "--question", "q1", "--option", "yes", "--decision", "Other", "--request-id", "tg-1-2", "--expected-revision", "3"], { from: "user" });
+    expect(calls).toEqual([]); expect(process.exitCode).toBe(1);
+  });
+  it("queue answer surfaces a stale revision refusal with a failing exit code", async () => {
+    const output = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { deps } = makeDeps({ routes: { "POST /api/queue/ask-1/answer": { status: 409, data: { error: "revision_conflict" } } } });
+    await createProgram({ queueDeps: deps }).parseAsync(["queue", "answer", "ask-1", "--decision", "Approved", "--request-id", "tg-1-2", "--expected-revision", "3", "--json"], { from: "user" });
+    expect(process.exitCode).toBe(1); expect(output.mock.calls.flat().join("\n")).toContain("revision_conflict");
+    output.mockRestore();
+  });
 });

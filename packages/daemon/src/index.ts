@@ -1,7 +1,7 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses, trackHttpServerUpgrades } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
@@ -300,7 +300,8 @@ export async function startServer(port?: number) {
     bindHosts = [explicitHost];
   } else {
     // Default path — the plan already computed loopback + tailscale-when-active.
-    bindHosts = bindPlan.hosts;
+    bindHosts = bearerToken?.trim() ? bindPlan.hosts : bindPlan.hosts.filter(isLoopbackBind);
+    if (bindHosts.length < bindPlan.hosts.length) console.log("[openrig] remote listeners disabled: configure OPENRIG_AUTH_BEARER_TOKEN to enable authenticated remote access");
   }
 
   const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
@@ -371,6 +372,7 @@ export async function startServer(port?: number) {
     });
     injectWebSocket(srv);
     trackHttpServerResponses(srv, deps.requestPhaseObserver?.observeRequest);
+    trackHttpServerUpgrades(srv);
     servers.push(srv);
   }
 

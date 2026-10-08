@@ -132,7 +132,7 @@ export async function spawnScenarioDaemon(
   // re-spawns through EXACTLY the same forced-local/scratch/fail-closed guarantees.
   const startProc = async () => {
     const start = await runRig(
-      ["daemon", "start", "--port", String(port), "--db", db, "--no-kernel"],
+      ["daemon", "start", "--host", "127.0.0.1", "--port", String(port), "--db", db, "--no-kernel"],
       scaffold.env,
       rigBin,
       timeoutMs,

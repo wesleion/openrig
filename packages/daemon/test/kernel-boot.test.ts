@@ -151,14 +151,13 @@ describe("bootKernelIfNeeded — short-circuit branches", () => {
     expect((bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
   });
 
-  it("returns skipped tracker when a kernel rig is already managed", async () => {
+  it("keeps tracking agent readiness when a kernel rig is already managed", async () => {
     const bootstrap = makeBootstrapMock();
     const tracker = await bootKernelIfNeeded(makeBaseDeps({
       rigRepo: makeRigRepo([{ name: "kernel" }]),
       bootstrapOrchestrator: bootstrap,
     }, tmpSpecsDir));
-    expect(tracker.getStatus().kernelState).toBe("skipped");
-    expect(tracker.getStatus().detail).toContain("already managed");
+    expect(tracker.getStatus().kernelState).toBe("booting");
     expect((bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap).not.toHaveBeenCalled();
   });
 

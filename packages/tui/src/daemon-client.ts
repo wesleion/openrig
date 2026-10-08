@@ -159,6 +159,7 @@ export class DaemonClient {
 
   humanUpdates() { return this.get("/api/queue/human-updates?limit=20"); }
   connections() { return this.get("/api/gateway/connections"); }
+  hostNames() { return this.get("/api/hosts") as Promise<{ ownName?: string }>; }
   slackManifest() { return this.get("/api/gateway/slack/manifest"); }
 
   fileRoots() { return this.get("/api/files/roots") as Promise<{ roots: import("./reading.js").FileRoot[]; hint?: string }>; }

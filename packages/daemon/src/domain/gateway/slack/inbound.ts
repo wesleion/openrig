@@ -108,6 +108,7 @@ export type InboundSenderResolution =
   | { admitted: false; teaching: string };
 
 export interface InboundDeps {
+  answerHumanDecision?: (input: { qitemId: string; actorSession: string; questionId?: string; optionId?: string; decision?: string; requestId: string }) => Promise<import("../../human-decision-service.js").HumanDecisionResult>;
   queue: InboundQueuePort;
   seen: SeenStore;
   deadLetter: DeadLetterStore<SlackEvent>;
@@ -242,6 +243,25 @@ export class InboundRouter {
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
       const { summary, body } = this.summaryOf(ev, transfer, route.correlationQitemId);
+      if (route.correlationQitemId && this.deps.answerHumanDecision) {
+        try {
+          await this.deps.answerHumanDecision({ qitemId: route.correlationQitemId, actorSession: who.source,
+            decision: body, requestId: `slack-message-${eventId}` });
+          this.deps.seen.mark(eventId, "landed");
+          return { landed: true, qitemId: route.correlationQitemId, correlationQitemId: route.correlationQitemId, replyResolution: "resolved" };
+        } catch (e) {
+          const error = e as { code?: string; httpStatus?: number };
+          if (error.code === "answer_ids_required") {
+            try { await this.deps.acknowledgeAnswer?.({ channel: ev.channel, threadTs: ev.thread_ts ?? ev.ts ?? "",
+              text: "This decision has structured questions. Use the question buttons to record each answer." }); } catch { /* Best-effort teaching; the decision remains open. */ }
+            this.deps.seen.mark(eventId, "landed");
+            return { landed: true, qitemId: route.correlationQitemId, correlationQitemId: route.correlationQitemId, replyResolution: "not-applicable" };
+          }
+          if (!["not_a_decision", "qitem_not_found", "not_the_asked_human", "decision_closed"].includes(error.code ?? "")) {
+            return { landed: false, reason: "resolve_failed", correlationQitemId: route.correlationQitemId };
+          }
+        }
+      }
       let qitemId: string;
       try {
         qitemId = await this.deps.queue.createQitem({
@@ -258,7 +278,7 @@ export class InboundRouter {
         return { landed: false, reason: "create_failed" };
       }
       let replyResolution: "resolved" | "already-resolved" | "not-applicable" | undefined;
-      if (route.correlationQitemId && this.deps.resolveHumanReply) {
+      if (route.correlationQitemId && this.deps.resolveHumanReply && !this.deps.answerHumanDecision) {
         try {
           replyResolution = await this.deps.resolveHumanReply({
             qitemId: route.correlationQitemId,
@@ -327,6 +347,21 @@ export class InboundRouter {
     const route = rootTs ? this.deps.resolveRoute?.({ type: "message", thread_ts: rootTs, channel: payload.channel?.id }) : undefined;
     const qitemId = route?.correlationQitemId;
     if (!rootTs || !route || !qitemId) return { status: "ignored", reason: "unmapped-message" };
+    if (this.deps.answerHumanDecision) {
+      if (!action?.action_ts) return { status: "ignored", reason: "missing-action-id" };
+      try {
+        const result = await this.deps.answerHumanDecision({ qitemId, actorSession: who.source, ...picked,
+          requestId: `slack-${payload.channel?.id}-${rootTs}-${action.action_ts}` });
+        if (live) {
+          try { await this.deps.acknowledgeAnswer?.({ channel: payload.channel?.id, threadTs: rootTs,
+            text: result.complete ? "All answers recorded and sent back." : `Answer recorded. Still to answer: ${result.remainingQuestions.join(", ")}` }); } catch { /* Decision is already durable. */ }
+        }
+        return { status: "accepted", reason: result.complete ? "answers-complete" : "answer-recorded" };
+      } catch (e) {
+        const status = (e as { httpStatus?: number }).httpStatus;
+        return { status: status && status < 500 ? "refused" : "handler-failed", reason: (e as { code?: string }).code ?? "answer-continuation-failed" };
+      }
+    }
     const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked });
     if (!recorded || recorded.status !== "recorded") {
       return { status: "ignored", reason: recorded?.reason ?? "answers-unavailable" };

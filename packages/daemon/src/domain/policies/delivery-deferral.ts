@@ -122,7 +122,7 @@ export async function fireDeliveryDeferralIfDue(input: FireDeliveryDeferralInput
   const notes = input.queueRepo.listTransitions(ctx.qitemId).map((t) => t.transitionNote ?? "");
   // The episode's receipt is the ONLY completion evidence: observe -> fired -> terminal.
   const receipted = notes.some((n) =>
-    n.startsWith("slack-owner-notification-posted ") && n.split(/\s+/).includes(`notification_key=${ctx.notificationKey}`));
+    (n.startsWith("slack-owner-notification-posted ") || n.startsWith("http-owner-notification-posted ")) && n.split(/\s+/).includes(`notification_key=${ctx.notificationKey}`));
   if (receipted) {
     if (!notes.some((n) => n.startsWith(DELIVERY_DEFERRAL_FIRED_PREFIX))) {
       input.queueRepo.update({

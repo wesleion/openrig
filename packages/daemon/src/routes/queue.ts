@@ -1,5 +1,8 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import { prepareBridgeCreate } from "../domain/gateway/human-bridge-create.js";
+import { HumanDecisionError } from "../domain/human-decision-service.js";
+import type { HumanBridgeConfig } from "../domain/gateway/human-bridge-config.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type {
   QueueRepository,
@@ -450,6 +453,7 @@ export function queueRoutes(): Hono {
   app.post("/create", async (c) => {
     const body = await c.req.json<{
       qitemId?: string;
+      requestId?: string;
       sourceSession?: string;
       destinationSession?: string;
       body?: string;
@@ -476,7 +480,9 @@ export function queueRoutes(): Hono {
     // P18 deliver-and-label: absent header + a body sourceSession → recorded as the claimed-era stamp
     // claimed:v1; absent header + no body → 400 actor_required; a body sourceSession that DIFFERS from the
     // header → the wire SUPERSEDES it (transport:v1), not a 409. `sourceSession` below is authoritative.
-    const identity = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
+    const bridge = c.get("humanBridge" as never) as HumanBridgeConfig | undefined;
+    const identity = bridge ? { ok: true as const, session: bridge.humanAddress, provenance: "transport:v1" as const }
+      : requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
     // Required destination and body, then PL-007: validate target_repo against
@@ -487,8 +493,17 @@ export function queueRoutes(): Hono {
     // passes-through when it doesn't know the source rig, so a post-forward
     // check cannot recover it. Local ordering is unchanged (the cross-host
     // branch is a no-op without hostId).
-    const refusal = createInputRefusal(c, sourceSession, body);
+    const refusal = createInputRefusal(c, bridge ? body.destinationSession ?? "" : sourceSession, body);
     if (refusal) return refusal;
+    if (bridge) {
+      try {
+        const prepared = prepareBridgeCreate(c.get("db" as never) as Database.Database, bridge, body);
+        if (prepared.priorResult) return c.json(prepared.priorResult as Record<string, unknown>, 201);
+      } catch (err) {
+        if (err instanceof HumanDecisionError) return c.json({ error: err.code, message: err.message }, err.httpStatus as 400);
+        return errorResponse(c, err);
+      }
+    }
 
     // OPR.0.4.6.MH3 FR-2 (C1): cross-host CREATE. A registered remote host id
     // forwards the write to that host's daemon; the qitem lives in the origin
@@ -532,10 +547,12 @@ export function queueRoutes(): Hono {
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
-        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
+        identityProvenance: bridge ? "transport:v1" : resolveRecordedProvenance(c, identity), // Scoped bridge identity is derived from its credential.
       });
       const advisory = destinationAdvisory(c, item.destinationSession);
-      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const result = { ...item, ...(advisory ? { advisories: [advisory] } : {}) };
+      if (bridge) (c.get("db" as never) as Database.Database).prepare("UPDATE human_bridge_creates SET result = ? WHERE bridge_id = ? AND request_id = ?").run(JSON.stringify(result), bridge.id, body.requestId);
+      return c.json(result, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

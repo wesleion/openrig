@@ -21,6 +21,7 @@
 
 import type { EventBus } from "./event-bus.js";
 import type { SessionRegistry } from "./session-registry.js";
+import { getNodeInventory } from "./node-inventory.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { BootstrapResult } from "./bootstrap-orchestrator.js";
 
@@ -130,7 +131,8 @@ export class KernelBootTracker {
     let kernelState = this.state;
     // Once bootstrap has completed (state == 'booting' before then),
     // promote to ready / partial_ready based on agent startup_status.
-    if (this.state === "booting" && !this.bootstrapInFlight) {
+    const alreadyManaged = this.state === "skipped" && this.detail === "kernel rig already managed";
+    if ((this.state === "booting" && !this.bootstrapInFlight) || alreadyManaged) {
       kernelState = this.aggregateReadinessFromAgents(agents);
     }
     return {
@@ -200,6 +202,15 @@ export class KernelBootTracker {
       if (kernelRigs.length === 0) return [];
       const out: KernelAgentStatus[] = [];
       for (const rig of kernelRigs) {
+        if (this.deps.rigRepo.db) {
+          for (const node of getNodeInventory(this.deps.rigRepo.db, rig.id)) {
+            if (!node.canonicalSessionName) continue;
+            out.push({ sessionName: node.canonicalSessionName, runtime: node.runtime ?? "unknown",
+              startupStatus: node.startupStatus === "ready" && node.lifecycleState !== "running"
+                ? "attention_required" : (node.startupStatus ?? "pending") as KernelAgentStatus["startupStatus"] });
+          }
+          continue;
+        }
         const sessions = this.deps.sessionRegistry.getSessionsForRig(rig.id);
         for (const s of sessions) {
           // session-registry's Session shape carries startupStatus +

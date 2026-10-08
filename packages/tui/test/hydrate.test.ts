@@ -12,6 +12,7 @@ import { createViewState } from "../src/state.js";
 
 const FIXTURES: Record<string, unknown> = {
   "/healthz": { ok: true, selfHostId: "mm2-openrig1" },
+  "/api/hosts": { ownName: "Desktop" },
   "/api/health?limit=200": {
     schema: "openrig.health-list/v0alpha1",
     evaluatedAt: "2026-09-05T12:00:00.000Z",
@@ -199,10 +200,11 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     });
     expect(snap.hosts[0]?.rigs[0]?.pods[0]?.agents[0]).toMatchObject({ nodeId: "01JNODEIMPL" });
   });
-  it("leaves health unassessed when a focused view skips the projection read", async () => {
+  it("hydrates health findings for a focused topology table", async () => {
     const context = { section: "topology" as const, viewTab: "table" as const, drill: [] };
     const snap = await hydrateSnapshot(fixtureClient(), undefined, undefined, undefined, undefined, context);
-    expect(snap.health).toBeUndefined();
+    expect(snap.health?.availability).toBe("loaded");
+    expect(snap.hosts[0]?.displayName).toBe("Desktop");
   });
   it("marks health unavailable when the selected health view read fails", async () => {
     const context = { section: "topology" as const, viewTab: "health" as const, drill: [] };

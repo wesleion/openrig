@@ -275,7 +275,7 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
     // flag at each dispatch, so pre-marker notes never survive) and (b) carries
     // the dispatched key when the marker is keyed. An unkeyed dispatch
     // (injected legacy ports) keeps the any-following-note shape.
-    if (note.startsWith("slack-owner-notification-posted ") || note.startsWith("delivery-termination:")) {
+    if (note.startsWith("slack-owner-notification-posted ") || note.startsWith("http-owner-notification-posted ") || note.startsWith("http-human-update-delivered") || note.startsWith("delivery-termination:")) {
       if (view.opEngineKey === null || note.split(/\s+/).includes(`notification_key=${view.opEngineKey}`)) {
         view.opOutcomeResolved = true;
       }

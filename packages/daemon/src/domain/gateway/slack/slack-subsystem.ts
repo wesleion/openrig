@@ -17,7 +17,8 @@ import { channelStateDigest } from "../channel-operations.js";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from "../gateway-subsystem.js";
+import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn, type SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
+import type { OutboundDecision } from "../protocol.js";
 import { downloadPrivateFile, postChatMessage } from "./slack-api.js";
 import { loadConfig } from "./config.js";
 import { resolveSecret } from "./secrets.js";
@@ -55,6 +56,8 @@ const SECRET_BOT = "SLACK_BOT_TOKEN";
 const SECRET_APP = "SLACK_APP_TOKEN";
 
 export interface SlackWireOpts {
+  alternateDelivery?: { enabled(): boolean; deliver(decision: OutboundDecision): Promise<SubsystemDeliveryOutcome | undefined> };
+  answerHumanDecision?: import("./inbound.js").InboundDeps["answerHumanDecision"];
   home: string;
   queueRepo: QueueRepository;
   log?: (msg: string) => void;
@@ -210,14 +213,17 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
 
   const outboundReady = cfg.enabled && bot !== null && cfg.channel !== null;
   const inboundReady = cfg.enabled && app !== null;
+  const alternateReady = opts.alternateDelivery?.enabled() === true;
+  const routedDelivery = (fallback: SubsystemDeliverFn): SubsystemDeliverFn => async decision =>
+    await opts.alternateDelivery?.deliver(decision) ?? await fallback(decision);
 
   if (!outboundReady && !inboundReady) {
     const missing = !cfg.enabled ? "connector disabled (rig slack enable)" : !bot ? "SLACK_BOT_TOKEN unresolved" : "channel unconfigured";
     log(`slack delivery not configured (${missing}) — wire is inert; dispatches would be refused honestly`);
     const inert = buildInProcessWire({
       home: opts.home,
-      ops: [],
-      deliver: async () => ({ ok: false, class: "slack-not-configured", detail: missing }),
+      ops: alternateReady ? [OUTBOUND_OP] : [],
+      deliver: routedDelivery(async () => ({ ok: false, class: "slack-not-configured", detail: missing })),
       log,
     });
     return { ...inert, status: () => ({ platform: "slack", configurationDigest: channelStateDigest(cfg), outboundReady: false, inboundReady: false, recovery: { state: "unavailable", reason: "inbound-not-configured" }, inbound: { state: "not-configured" } }) };
@@ -225,7 +231,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
 
   const registrySurface: RegistrySurface = opts.registry ?? { loadHumanRegistry, resolveSlackHandle };
   const ports = makeQueuePorts(opts.queueRepo, {
-    loadHumanRegistry: () => registrySurface.loadHumanRegistry(opts.home),
+    loadHumanRegistry: () => {
+      const registry = registrySurface.loadHumanRegistry(opts.home);
+      return registry.ok ? { ...registry, entities: registry.entities.filter(h => h.connectorBindings.some(b => b.role === "primary" && b.kind === "slack")) } : registry;
+    },
   });
   // OPR.0.5.6.1 — the one engine consult (AM-F5: the gateway consults the
   // engine BEFORE dispatch). Null = destination is not a registered human;
@@ -530,8 +539,8 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
 
   const wire = buildInProcessWire({
     home: opts.home,
-    ops: outboundReady ? [OUTBOUND_OP] : [],
-    deliver: outboundReady ? engineDeliver : deliver,
+    ops: outboundReady || alternateReady ? [OUTBOUND_OP] : [],
+    deliver: routedDelivery(outboundReady ? engineDeliver : deliver),
     log,
   });
 
@@ -580,6 +589,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // a failed hand-back is retried with the event dead-letters, and each click is confirmed
       // in the decision's thread (a bot post, so inbound never ingests it).
       recordHumanAnswer: (input) => opts.queueRepo.recordHumanAnswer(input),
+      answerHumanDecision: opts.answerHumanDecision,
       actionDeadLetter: new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl")),
       ...(bot ? {
         acknowledgeAnswer: async ({ channel, threadTs, text }: { channel?: string; threadTs: string; text: string }) => {

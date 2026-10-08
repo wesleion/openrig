@@ -632,7 +632,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
       const expanded = new Set(state.expanded);
       for (const host of snap.hosts) {
         rows.push({
-          label: `  ▾ ${host.name}${host.reachable ? "" : " (unreachable)"}`,
+          label: `  ▾ ${host.displayName || host.name}${host.reachable ? "" : " (unreachable)"}`,
           action: { type: "drill", resource: "host", name: host.name },
           key: `host:${host.name}`,
         });
