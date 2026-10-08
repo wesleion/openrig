@@ -15,6 +15,27 @@ interface MailEvent { event_id: number; qitem_id: string; revision: number; payl
 export class HumanBridgeMailbox {
   constructor(private readonly db: Database.Database, private readonly native?: { home: string; queue: QueueRepository }) {}
 
+  private audience(bridge: HumanBridgeConfig, item: { destinationSession: string; sourceSession: string; state: string; blockedOn?: string | null; nativeDestinationSession?: string; humanIntent?: string | null; askedHuman?: boolean }) {
+    const recipients = [bridge.humanAddress, ...bridge.legacyAliases];
+    const humanBlocker = item.humanIntent !== "update" && (recipients.includes(item.blockedOn ?? "") && ["blocked", "done", "canceled", "expired"].includes(item.state)
+      || item.askedHuman === true && item.humanIntent === "decision" && ["done", "canceled", "expired"].includes(item.state));
+    const originalDestination = item.nativeDestinationSession ?? item.destinationSession;
+    const excludedOwnTask = !humanBlocker && recipients.includes(item.sourceSession) && !recipients.includes(originalDestination) && !bridge.allowedDestinations.includes(originalDestination);
+    const ownTask = !humanBlocker && !recipients.includes(item.destinationSession) && recipients.includes(item.sourceSession) && bridge.allowedDestinations.includes(item.destinationSession);
+    return { humanBlocker, ownTask, excludedOwnTask, admitted: !excludedOwnTask && (recipients.includes(item.destinationSession) || humanBlocker || ownTask) };
+  }
+
+  private supersedeExcludedTasks(bridge: HumanBridgeConfig): void {
+    const rows = this.db.prepare("SELECT decision_id, payload FROM human_bridge_dispatch WHERE bridge_id = ? AND human_address = ? AND status IN ('pending','failed')").all(bridge.id, bridge.humanAddress) as Array<{ decision_id: string; payload: string }>;
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload);
+      if (!payload.qitem.sourceSession || !this.audience(bridge, payload.qitem).excludedOwnTask) continue;
+      payload.supersededReason = "destination_not_allowed";
+      this.db.prepare("UPDATE human_bridge_dispatch SET status = 'superseded', payload = ? WHERE bridge_id = ? AND decision_id = ?").run(JSON.stringify(payload), bridge.id, row.decision_id);
+      this.db.prepare("INSERT OR IGNORE INTO human_bridge_receipt_log(bridge_id, decision_id, attempt_id, status, payload) VALUES(?, ?, 'policy:allowedDestinations', 'superseded', ?)").run(bridge.id, row.decision_id, JSON.stringify({ reason: payload.supersededReason }));
+    }
+  }
+
   acceptGatewayDecision(bridge: HumanBridgeConfig, decision: OutboundDecision): boolean {
     const input = decision.payload as { qitemId?: string; notificationKey?: string; summary?: string; body?: string };
     if (!input?.qitemId) throw new HumanDecisionError("notification_item_required", 400, "Native HTTP notifications require a queue item");
@@ -26,7 +47,7 @@ export class HumanBridgeMailbox {
       if (prior) return prior.acknowledged > 0 || !!this.db.prepare("SELECT 1 FROM human_bridge_dispatch WHERE bridge_id = ? AND decision_id = ? AND status = 'delivered'").get(bridge.id, prior.decision_id);
       const item = this.native?.queue.getById(qitemId);
       if (!item) throw new HumanDecisionError("qitem_not_found", 404, "Native notification item is missing");
-      const asked = [bridge.humanAddress, ...bridge.legacyAliases].includes(item.destinationSession);
+      const asked = [bridge.humanAddress, ...bridge.legacyAliases].includes(item.destinationSession) || item.state === "blocked" && [bridge.humanAddress, ...bridge.legacyAliases].includes(item.blockedOn ?? "");
       const payload = { ...item, destinationSession: bridge.humanAddress, humanIntent: asked ? item.humanIntent ?? "decision" : "update",
         summary: input.summary ?? item.summary, body: input.body ?? item.body, nativeAskedHuman: asked, nativeDestinationSession: item.destinationSession,
         bridgeId: bridge.id, nativeDecisionId: decision.decisionId };
@@ -88,6 +109,7 @@ export class HumanBridgeMailbox {
     const start = cursor === undefined ? undefined : Number(cursor);
     if (start !== undefined && !Number.isSafeInteger(start)) throw new HumanDecisionError("invalid_cursor", 400, "Invalid mailbox cursor");
     return this.db.transaction(() => {
+      this.supersedeExcludedTasks(bridge);
       this.db.prepare("INSERT INTO human_bridge_presence(bridge_id, human_address, last_poll_at) VALUES(?, ?, ?) ON CONFLICT(bridge_id) DO UPDATE SET human_address = excluded.human_address, last_poll_at = excluded.last_poll_at").run(bridge.id, bridge.humanAddress, new Date().toISOString());
       const end = (this.db.prepare("SELECT COALESCE(MAX(event_id),0) AS n FROM human_bridge_events").get() as { n: number }).n;
       if (start !== undefined && start > end) throw new HumanDecisionError("cursor_ahead", 409, "Mailbox history changed; request a new snapshot");
@@ -96,34 +118,46 @@ export class HumanBridgeMailbox {
         : this.db.prepare("SELECT * FROM human_bridge_events WHERE event_id > ? AND event_id <= ? AND (json_extract(payload, '$.bridgeId') IS NULL OR json_extract(payload, '$.bridgeId') = ?) ORDER BY event_id").all(start, end, bridge.id)) as MailEvent[];
       const recipients = [bridge.humanAddress, ...bridge.legacyAliases];
       const known = new Map<string, boolean>();
+      const priorHumanDecisions = new Set<string>();
       const lastEvent = new Map<string, number>();
       const previous = this.db.prepare("SELECT payload FROM human_bridge_dispatch WHERE bridge_id = ? AND human_address = ? ORDER BY event_id").all(bridge.id, bridge.humanAddress) as Array<{ payload: string }>;
       for (const row of previous) {
         const payload = JSON.parse(row.payload);
-        known.set(payload.qitem.qitemId, payload.type !== "withdrawn");
+        known.set(payload.qitem.qitemId, payload.type !== "withdrawn" && payload.supersededReason !== "destination_not_allowed");
+        if (payload.type !== "withdrawn" && payload.qitem.askedHuman && payload.qitem.humanIntent === "decision") priorHumanDecisions.add(payload.qitem.qitemId);
+        else priorHumanDecisions.delete(payload.qitem.qitemId);
         lastEvent.set(payload.qitem.qitemId, Number(payload.eventId));
+      }
+      // Previously omitted human blockers must appear even when the consumer
+      // has already advanced its cursor past their creation.
+      if (start !== undefined) {
+        const snapshots = this.db.prepare("SELECT e.* FROM human_bridge_events e JOIN (SELECT qitem_id, MAX(event_id) AS latest FROM human_bridge_events WHERE json_extract(payload, '$.bridgeId') IS NULL OR json_extract(payload, '$.bridgeId') = ? GROUP BY qitem_id) x ON x.latest = e.event_id WHERE e.event_id <= ?").all(bridge.id, start) as MailEvent[];
+        for (const row of snapshots) if (!lastEvent.has(row.qitem_id) && this.audience(bridge, JSON.parse(row.payload)).humanBlocker) rows.push(row);
       }
       const events = [];
       const latest = new Map<string, MailEvent>();
       for (const row of rows) {
         const item = JSON.parse(row.payload);
-        const ownTask = !recipients.includes(item.destinationSession) && recipients.includes(item.sourceSession) && parseSessionName(item.destinationSession).kind === "canonical";
-        if (recipients.includes(item.destinationSession) || ownTask || recipients.includes(row.previous_destination_session ?? "") || known.get(row.qitem_id)) {
+        const audience = this.audience(bridge, item);
+        const settled = priorHumanDecisions.has(row.qitem_id) && ["done", "canceled", "expired"].includes(item.state);
+        if (audience.excludedOwnTask && !settled) continue;
+        if (audience.admitted || settled || recipients.includes(row.previous_destination_session ?? "") || known.get(row.qitem_id)) {
           latest.set(row.qitem_id, row);
         }
       }
       for (const row of [...latest.values()].sort((a, b) => a.event_id - b.event_id)) {
         if ((lastEvent.get(row.qitem_id) ?? 0) > row.event_id) continue;
         const item = JSON.parse(row.payload);
-        const ownTask = !recipients.includes(item.destinationSession) && recipients.includes(item.sourceSession) && parseSessionName(item.destinationSession).kind === "canonical";
-        const admitted = recipients.includes(item.destinationSession) || ownTask;
+        const { ownTask, admitted: currentAdmitted, humanBlocker } = this.audience(bridge, item);
+        const settled = priorHumanDecisions.has(row.qitem_id) && ["done", "canceled", "expired"].includes(item.state);
+        const admitted = currentAdmitted || settled;
         if (!admitted && !recipients.includes(row.previous_destination_session ?? "") && !known.get(row.qitem_id)) continue;
         const decisionId = deliveryId(bridge.id, row.qitem_id, row.revision, item.nativeDecisionId);
         const source = parseSessionName(item.sourceSession);
         const parsed = ownTask ? parseSessionName(item.destinationSession) : source.kind === "canonical" ? source : parseSessionName(item.destinationSession);
         const rigId = parsed.kind === "canonical" ? parsed.rig : null;
         const project = rigId ? bridge.origins[rigId] : undefined;
-        const qitem = admitted ? { ...item, askedHuman: item.nativeAskedHuman ?? !ownTask, humanIntent: ownTask ? "update" : item.humanIntent ?? "decision",
+        const qitem = admitted ? { ...item, askedHuman: humanBlocker || settled || (item.nativeAskedHuman ?? !ownTask), humanIntent: humanBlocker || settled ? "decision" : ownTask ? "update" : item.humanIntent ?? "decision",
           origin: { hostId: null, rigId, projectId: project?.projectId ?? null, projectName: project?.projectName ?? null, targetRepo: item.targetRepo ?? null } }
           : { qitemId: row.qitem_id, revision: row.revision };
         const seen = this.db.prepare("SELECT 1 FROM human_bridge_dispatch WHERE bridge_id = ? AND human_address = ? AND json_extract(payload, '$.qitem.qitemId') = ?").get(bridge.id, bridge.humanAddress, row.qitem_id);
@@ -135,7 +169,7 @@ export class HumanBridgeMailbox {
         events.push({ ...JSON.parse(dispatch.payload), deliveryStatus: dispatch.status });
       }
       // This durable ledger is authoritative for HTTP delivery. Polling never acknowledges delivery.
-      const pending = this.db.prepare("SELECT decision_id, payload, status FROM human_bridge_dispatch WHERE bridge_id = ? AND human_address = ? AND status IN ('pending','failed','indeterminate','attempting') ORDER BY event_id").all(bridge.id, bridge.humanAddress) as Array<{ decision_id: string; payload: string; status: string }>;
+      const pending = (this.db.prepare("SELECT decision_id, payload, status FROM human_bridge_dispatch WHERE bridge_id = ? AND human_address = ? AND status IN ('pending','failed','indeterminate','attempting') ORDER BY event_id").all(bridge.id, bridge.humanAddress) as Array<{ decision_id: string; payload: string; status: string }>).filter(row => !this.audience(bridge, JSON.parse(row.payload).qitem).excludedOwnTask);
       const uncertain = new Set(pending.filter(p => ["attempting", "indeterminate"].includes(p.status)).map(p => JSON.parse(p.payload).qitem.qitemId));
       const cards = new Map<string, { chatId: string; messageId: string }>();
       const delivered = this.db.prepare("SELECT payload, receipt FROM human_bridge_dispatch WHERE bridge_id = ? AND human_address = ? AND status = 'delivered' ORDER BY event_id DESC").all(bridge.id, bridge.humanAddress) as Array<{ payload: string; receipt: string | null }>;
@@ -158,6 +192,7 @@ export class HumanBridgeMailbox {
     if (!input || typeof input.decisionId !== "string" || !["attempting", "delivered", "failed", "indeterminate"].includes(input.status) || typeof input.attemptId !== "string" || !input.attemptId.trim() ||
         (input.status === "delivered" && (typeof input.chatId !== "string" || !input.chatId || typeof input.messageId !== "string" || !input.messageId))) throw new HumanDecisionError("invalid_receipt", 400, "A delivery receipt requires decisionId, attemptId, status, and Telegram message coordinates for success");
     const result = this.db.transaction(() => {
+      this.supersedeExcludedTasks(bridge);
       const row = this.db.prepare("SELECT * FROM human_bridge_dispatch WHERE bridge_id = ? AND human_address = ? AND decision_id = ?").get(bridge.id, bridge.humanAddress, input.decisionId) as { status: string; receipt: string | null; payload: string } | undefined;
       if (!row) throw new HumanDecisionError("delivery_not_found", 404, "Delivery not found for this bridge");
       const previous = row.receipt ? JSON.parse(row.receipt) : undefined;

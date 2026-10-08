@@ -52,6 +52,65 @@ describe("native human bridge", () => {
   async function ask(structured = true) {
     return queue.create({ qitemId: "human-request", sourceSession: "builder@agency-sites", destinationSession: "human@kernel", body: "Escolha", summary: "Escolha", evidenceRef: "test:evidence", humanIntent: "decision", humanQuestions: structured ? questions : undefined, nudge: false });
   }
+  async function humanBlocked(id = "legacy-blocker") {
+    const q = await queue.create({ qitemId: id, sourceSession: "coordinator@elsewhere", destinationSession: "worker@elsewhere",
+      body: "Decision needed", summary: "Decision needed", evidenceRef: "test:blocker-evidence", nudge: false });
+    queue.update({ qitemId: q.qitemId, actorSession: q.destinationSession, state: "blocked", blockedOn: "human@kernel" });
+    return queue.getById(q.qitemId)!;
+  }
+  it("admits legacy human blockers outside the task allowlist after an advanced cursor and answers through HTTP exactly once", async () => {
+    const a = app(), q = await humanBlocked();
+    const box = new HumanBridgeMailbox(db);
+    const cursor = String((db.prepare("SELECT MAX(event_id) n FROM human_bridge_events").get() as { n: number }).n);
+    const inbox = box.inbox(bridge, cursor);
+    const frame = inbox.pending.find(p => p.qitem.qitemId === q.qitemId)!;
+    expect(frame.qitem.humanIntent).toBe("decision"); expect(frame.qitem.askedHuman).toBe(true);
+    expect(frame.qitem.destinationSession).toBe("worker@elsewhere");
+    const input = { requestId: "tg-123-55", expectedRevision: q.revision, decision: "Continue with option B" };
+    const request = () => a.request("/api/queue/" + q.qitemId + "/answer", {
+      method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify(input) });
+    const first = await request(); expect(first.status).toBe(200);
+    const result = await first.json();
+    const repeat = await request(); expect(repeat.status).toBe(200); expect(await repeat.json()).toEqual(result);
+    expect(queue.getById(q.qitemId)?.state).toBe("done");
+    const replies = db.prepare("SELECT source_session, destination_session FROM queue_items WHERE qitem_id LIKE 'qitem-human-answer-%'").all();
+    expect(replies).toEqual([{ source_session: actor.session, destination_session: "worker@elsewhere" }]);
+    expect(box.inbox(bridge, inbox.cursor).pending.some(p => p.qitem.qitemId === q.qitemId && p.type === "resolved")).toBe(true);
+  });
+  it("validates human blocker identity, revisions, and the current blocked state", async () => {
+    const q = await humanBlocked("validation-blocker");
+    await expect(service.answer(q.qitemId, { session: "other@external", scope: "other" },
+      { requestId: "wrong", decision: "Yes" })).rejects.toMatchObject({ code: "not_the_asked_human" });
+    await expect(service.answer(q.qitemId, actor, { requestId: "stale", expectedRevision: q.revision - 1,
+      decision: "Yes" })).rejects.toMatchObject({ code: "revision_conflict" });
+    queue.update({ qitemId: q.qitemId, actorSession: q.destinationSession, state: "pending", blockedOn: null });
+    await expect(service.answer(q.qitemId, actor, { requestId: "unblocked", decision: "Yes" })).rejects.toMatchObject({ code: "not_the_asked_human" });
+    expect(db.prepare("SELECT count(*) n FROM human_decisions").get()).toEqual({ n: 0 });
+  });
+  it("supersedes unsent out-of-scope task updates before a cached sender can reserve them, without changing tasks", async () => {
+    const ids = ["teste-fumaca-0001", "e5c-stack-playbooks", "e5c-ajuste-stack", "t1-fikfrio"];
+    for (const id of ids) await queue.create({ qitemId: id, sourceSession: actor.session,
+      destinationSession: "intake-lead@sites-lab", body: id, summary: id, nudge: false });
+    const box = new HumanBridgeMailbox(db), legacy = box.inbox({ ...bridge, allowedDestinations: ["intake-lead@sites-lab"] });
+    expect(legacy.pending).toHaveLength(4);
+    const old = legacy.pending[0];
+    expect(box.receipt(bridge, { decisionId: old.decisionId, attemptId: "cached-send", status: "attempting" }))
+      .toMatchObject({ status: "superseded", sendAllowed: false });
+    expect(box.inbox(bridge, legacy.cursor).pending).toHaveLength(0);
+    expect(box.inbox(bridge).events).toHaveLength(0);
+    expect(db.prepare("SELECT status, receipt FROM human_bridge_dispatch").all()).toEqual(ids.map(() => ({ status: "superseded", receipt: null })));
+    expect(db.prepare("SELECT COUNT(*) n FROM human_bridge_receipt_log WHERE status='superseded'").get()).toEqual({ n: 4 });
+    expect(db.prepare("SELECT DISTINCT state FROM queue_items").all()).toEqual([{ state: "pending" }]);
+  });
+  it("excludes disallowed task updates but preserves uncertain attempts for explicit reconciliation", async () => {
+    await queue.create({ qitemId: "scope-change", sourceSession: actor.session,
+      destinationSession: "old@other", body: "old task", summary: "old task", nudge: false });
+    const box = new HumanBridgeMailbox(db), broad = { ...bridge, allowedDestinations: ["old@other"] };
+    const frame = box.inbox(broad).pending[0];
+    box.receipt(broad, { decisionId: frame.decisionId, attemptId: "in-flight", status: "attempting" });
+    expect(box.inbox(bridge).pending).toHaveLength(0);
+    expect(db.prepare("SELECT status FROM human_bridge_dispatch").get()).toEqual({ status: "attempting" });
+  });
   function app() {
     const registered = addHumanFragment(human, home);
     if (!registered.ok) throw new Error(registered.error);

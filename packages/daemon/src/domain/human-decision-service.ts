@@ -57,9 +57,10 @@ export class HumanDecisionService {
       }
       const item = this.queue.getById(qitemId);
       if (!item) throw new HumanDecisionError("qitem_not_found", 404, "Queue item not found");
-      if (!askedHumanMatches(item.destinationSession, actor.session, actor.aliases)) throw new HumanDecisionError("not_the_asked_human", 403, "This request was addressed to another human");
+      const blockedHuman = item.state === "blocked" && askedHumanMatches(item.blockedOn ?? "", actor.session, actor.aliases);
+      if (!blockedHuman && !askedHumanMatches(item.destinationSession, actor.session, actor.aliases)) throw new HumanDecisionError("not_the_asked_human", 403, "This request was addressed to another human");
       if (item.humanIntent === "update") throw new HumanDecisionError("not_a_decision", 409, "An update does not request a decision");
-      if (item.state !== "pending") throw new HumanDecisionError("decision_closed", 409, `The request is ${item.state}`);
+      if (item.state !== "pending" && !blockedHuman) throw new HumanDecisionError("decision_closed", 409, `The request is ${item.state}`);
       if (input.expectedRevision !== undefined && this.revision(qitemId) !== input.expectedRevision) throw new HumanDecisionError("revision_conflict", 409, "Reload the revised request before answering");
       const questions = item.humanQuestions ?? [];
       const selected = Object.entries(input.answers ?? {});
@@ -81,7 +82,7 @@ export class HumanDecisionService {
       const complete = !remaining.length;
       const result: HumanDecisionResult = { qitemId, complete, revision: this.revision(qitemId), answers: fresh.humanAnswers ?? {}, remainingQuestions: remaining.map(q => q.id), status: complete ? "resolved" : "partial" };
       const decision = questions.length ? formatHumanAnswers(questions, result.answers).join("; ") : input.decision!.trim();
-      const stored = JSON.stringify({ actor, decision, recordedRevision: result.revision, sourceSession: fresh.sourceSession });
+      const stored = JSON.stringify({ actor, decision, recordedRevision: result.revision, sourceSession: blockedHuman ? fresh.destinationSession : fresh.sourceSession, blockedHuman });
       this.db.prepare("INSERT INTO human_decisions(scope, request_id, digest, qitem_id, actor_session, input, state, result) VALUES(?, ?, ?, ?, ?, ?, ?, ?)")
         .run(actor.scope, input.requestId, digest, qitemId, actor.session, stored, complete ? "recorded" : "partial", JSON.stringify(result));
       return this.db.prepare("SELECT * FROM human_decisions WHERE scope = ? AND request_id = ?").get(actor.scope, input.requestId) as DecisionRow;
@@ -97,10 +98,10 @@ export class HumanDecisionService {
   }
 
   private async finish(row: DecisionRow): Promise<HumanDecisionResult> {
-    const data = JSON.parse(row.input) as { actor: HumanDecisionActor; decision: string; recordedRevision: number; sourceSession: string };
+    const data = JSON.parse(row.input) as { actor: HumanDecisionActor; decision: string; recordedRevision: number; sourceSession: string; blockedHuman?: boolean };
     const item = this.queue.getById(row.qitem_id);
     const wasResolved = this.queue.transitionLog.listForQitem(row.qitem_id).some(t => t.ownerNotificationKind === "human-decision-resolved");
-    if (!wasResolved && (!item || item.state !== "pending" || this.revision(row.qitem_id) !== data.recordedRevision)) {
+    if (!wasResolved && (!item || item.state !== (data.blockedHuman ? "blocked" : "pending") || this.revision(row.qitem_id) !== data.recordedRevision)) {
       this.db.prepare("UPDATE human_decisions SET state = 'superseded' WHERE scope = ? AND request_id = ?").run(row.scope, row.request_id);
       throw new HumanDecisionError("decision_superseded", 409, "The request changed or closed before continuation");
     }
@@ -108,11 +109,14 @@ export class HumanDecisionService {
       const continuationId = `qitem-human-answer-${createHash("sha256").update(row.qitem_id).digest("hex").slice(0,24)}`;
       await this.queue.create({ qitemId: continuationId, sourceSession: row.actor_session, destinationSession: data.sourceSession,
         body: `${data.decision}\n\nIn reply to: ${row.qitem_id}`, summary: "Human decision received", tags: ["human-answer"], identityProvenance: "transport:v1" });
-      const resolved = await this.resolveReply({ qitemId: row.qitem_id, actorSession: row.actor_session, decision: data.decision });
+      const resolved = data.blockedHuman ? "not-applicable" : await this.resolveReply({ qitemId: row.qitem_id, actorSession: row.actor_session, decision: data.decision });
       if (resolved === "not-applicable") {
         // Legacy local human seats are admitted only by the explicit alias validated above.
         const current = this.queue.getById(row.qitem_id);
-        if (!current || current.state !== "pending" || current.blockedOn || !askedHumanMatches(current.destinationSession, data.actor.session, data.actor.aliases)) throw new HumanDecisionError("resolve_not_applicable", 409, "The request could not be resolved");
+        const addressed = current && (data.blockedHuman
+          ? current.state === "blocked" && askedHumanMatches(current.blockedOn ?? "", data.actor.session, data.actor.aliases)
+          : current.state === "pending" && !current.blockedOn && askedHumanMatches(current.destinationSession, data.actor.session, data.actor.aliases));
+        if (!addressed) throw new HumanDecisionError("resolve_not_applicable", 409, "The request could not be resolved");
         this.queue.update({ qitemId: row.qitem_id, actorSession: row.actor_session, state: "done", closureReason: "no-follow-on", transitionNote: data.decision, ownerNotificationKind: "human-decision-resolved" });
       }
     }

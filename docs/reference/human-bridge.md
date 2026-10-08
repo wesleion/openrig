@@ -38,6 +38,10 @@ Slack buttons and free-text decisions use this same service. Free text on a stru
 
 ## Task creation and identity
 
+An agent-owned item in state `blocked` with `blockedOn` equal to the registered human or an explicit legacy alias also enters the mailbox as a decision. Its destination remains the agent. A free-text `POST /api/queue/:qitemId/answer` records the canonical human decision, resolves that request and creates one correlated continuation for the owning agent. Retries reuse the recorded result. Previously omitted blockers are included even after the consumer has advanced its cursor.
+
+Human-authored task updates require an exact match in `allowedDestinations`. Previously queued updates outside that list become `superseded` only while `pending` or definitely `failed`; their queue items remain unchanged and no delivery receipt is fabricated. An old cached sender cannot reserve such an update. Already attempted or uncertain sends retain their audit state for explicit reconciliation and are not returned as task updates outside the configured scope.
+
 `POST /api/queue/create`, or `rig bridge create --request-file <json>`, supports a stable `qitemId` and `requestId`. The credential supplies the human source. Retrying the same request returns the original result; changing its content or reusing another item's ID returns 409. Only configured destinations are admitted. A Telegram text/audio message ID is a suitable retry identity. For buttons, a step suffix must distinguish actual callback actions, not merely the question ID.
 
 The Hermes plugin must verify the Telegram sender against the registered platform user before using its credential. Native HTTP authorization authenticates the bridge credential; it cannot independently inspect Telegram's update authenticity. Do not accept a human identity asserted in arbitrary message text.
