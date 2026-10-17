@@ -33,6 +33,8 @@ interface InventoryRow {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  effort?: string | null;
+  controller_json?: string | null;
   codex_config_profile: string | null;
   agent_ref: string | null;
   profile: string | null;
@@ -539,6 +541,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
   const codexConfigProfileSelect = hasCodexConfigProfile
     ? "n.codex_config_profile"
     : "NULL";
+  const nodeColumns = new Set(db.prepare("PRAGMA table_info(nodes)").all().map(r => (r as { name: string }).name));
   const stmt = db.prepare(`
     SELECT
       n.id as node_id,
@@ -550,6 +553,8 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       n.role,
       n.runtime,
       n.model,
+      ${nodeColumns.has("effort") ? "n.effort" : "NULL"} AS effort,
+      ${nodeColumns.has("controller_json") ? "n.controller_json" : "NULL"} AS controller_json,
       ${codexConfigProfileSelect} as codex_config_profile,
       n.agent_ref,
       n.profile,
@@ -706,6 +711,8 @@ function buildInventoryEntry(
     latestError: row.startup_status === "ready" ? null : getLatestError(db, row.rig_id, row.node_id),
     // Extended fields
     model: row.model,
+    effort: row.effort ?? null,
+    controller: row.controller_json ? { ...JSON.parse(row.controller_json), available: false } : null,
     agentRef: row.agent_ref,
     profile: row.profile,
     codexConfigProfile: row.codex_config_profile,
@@ -990,6 +997,8 @@ export function getNodeDetail(
  * Context-aware wrapper: returns inventory with context usage attached.
  * Uses one daemon-owned ContextUsageStore for all reads.
  */
+import { SessionRenewalStore } from "./session-renewal-store.js";
+
 export function getNodeInventoryWithContext(
   db: Database.Database,
   rigId: string,
@@ -1028,6 +1037,7 @@ export function getNodeInventoryWithContext(
     return {
       ...e,
       contextUsage: { ...usage, currentUsage: null },
+      ...new SessionRenewalStore(db).view(nodeId, usage),
       ...(transcriptIngest ? { transcriptIngest } : {}),
     };
   });
@@ -1105,6 +1115,8 @@ export function attachTerminalActivityAndWork(
             needsInput: arb.needsInput,
             decidedBy: arb.decidedBy,
             seq: arb.seq,
+            changedAt: arb.changedAt,
+            activityStartedAt: arb.activityStartedAt,
             lastSwap: arb.lastSwap,
           }
         : null;

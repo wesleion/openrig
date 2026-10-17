@@ -61,6 +61,7 @@ export class ContextMonitor {
     readinessCheckers?: Record<string, RuntimeReadinessChecker | undefined>,
     usageSamples?: UsageSamplesStore,
     providerWindowSampler?: () => ProviderWindowSampleInput[],
+    private resolveCodexRuntime?: (sessionName: string, nodeId: string) => Promise<{ threadId: string; codexHome: string; generationUuid: string } | null>,
   ) {
     this.db = db;
     this.store = store;
@@ -94,7 +95,7 @@ export class ContextMonitor {
       const canReadContextUsage = session.runtime !== "codex" || !!session.resume_token;
       if (canReadContextUsage) {
         try {
-          observed = this.readContextUsage(session);
+          observed = await this.readContextUsage(session);
           this.store.persist(session.node_id, observed);
           // 51-08 A1: the over-time twin — advance-only append on the SAME tick
           // (PM decision 1: piggyback, no parallel sampler). Known samples only:
@@ -238,11 +239,13 @@ export class ContextMonitor {
     `).all() as EligibleSession[];
   }
 
-  private readContextUsage(session: EligibleSession) {
+  private async readContextUsage(session: EligibleSession) {
     if (session.runtime === "codex") {
+      const live = this.resolveCodexRuntime ? await this.resolveCodexRuntime(session.session_name, session.node_id) : undefined;
       return this.store.readCodexAndNormalize({
-        threadId: session.resume_token,
+        threadId: this.resolveCodexRuntime ? live?.threadId : session.resume_token,
         sessionName: session.session_name,
+        ...(live ? { codexHome: live.codexHome, verifiedGeneration: live.generationUuid } : {}),
       });
     }
 

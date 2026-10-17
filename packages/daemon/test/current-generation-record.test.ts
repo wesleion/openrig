@@ -170,7 +170,7 @@ describe("paneClaudeSessionIdArgument (a CANDIDATE source, never the answer alon
 describe("resolveLiveCodexThreadId", () => {
   it("joins through the live codex pid's logs, bypassing any stored token", async () => {
     const out = await resolveLiveCodexThreadId("s", deps);
-    expect(out).toEqual({ ok: true, id: "thread-live-123" });
+    expect(out).toEqual({ ok: true, id: "thread-live-123", pid: 30, startedAt: undefined });
   });
 
   it("a codex process whose logs yield nothing is a NAMED reason", async () => {

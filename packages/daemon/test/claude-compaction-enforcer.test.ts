@@ -123,6 +123,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenLastCalledWith(
       "claude-seat@rig",
       expect.stringContaining("OpenRig automatic compaction preparation is now required"),
+      { managedCompaction: true },
     );
     expect(send.mock.calls[0]![1]).toContain("Current context usage is 80%; configured compaction threshold is 80%");
     expect(send.mock.calls[0]![1]).toContain("Operator pre-compaction instruction");
@@ -982,6 +983,7 @@ describe("ClaudeCompactionEnforcer", () => {
         expect(send).toHaveBeenCalledWith(
           "claude-seat@rig",
           expect.stringContaining("OpenRig automatic compaction preparation"),
+          { managedCompaction: true },
         );
 
         const compact = await enforcer.maybeAutoCompact({

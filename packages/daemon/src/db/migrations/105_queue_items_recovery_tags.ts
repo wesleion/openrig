@@ -11,7 +11,7 @@ import type { Migration } from "../migrate.js";
 // Keep the parenthesised group byte-identical to RECOVERY_TAG_ROWS in queue-recovery.ts: SQLite uses a
 // partial index only when the query repeats a term of its WHERE clause.
 export const queueItemsRecoveryTagsSchema: Migration = {
-  name: "099_queue_items_recovery_tags.sql",
+  name: "105_queue_items_recovery_tags.sql",
   sql: `
     CREATE INDEX IF NOT EXISTS idx_queue_items_recovery_tags
       ON queue_items(qitem_id)

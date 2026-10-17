@@ -104,6 +104,7 @@ export class RigSpecExporter {
     return {
       schemaVersion: 1,
       name: rig.rig.name,
+      ...(rig.rig.sessionRenewal ? { sessionRenewal: rig.rig.sessionRenewal } : {}),
       version: "0.1.0",
       nodes,
       edges,
@@ -160,6 +161,8 @@ export class RigSpecExporter {
         if (node.codexConfigProfile) member.codexConfigProfile = node.codexConfigProfile;
         if (node.model) member.model = node.model;
         if (node.effort) member.effort = node.effort;
+        if (node.controller) member.controller = node.controller;
+        if (node.sessionRenewal) member.sessionRenewal = node.sessionRenewal;
         // OPR.0.4.6.FAC1: a declared seat role exports with the pod
         // member (round-trip fidelity — export→import keeps the role).
         if (node.role) member.role = node.role;

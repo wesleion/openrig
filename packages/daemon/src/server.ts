@@ -95,6 +95,10 @@ import { PermissionDriftObserver, type PermissionDriftReader } from "./domain/pe
 import { chatRoutes } from "./routes/chat.js";
 import { streamRoutes } from "./routes/stream.js";
 import { queueRoutes } from "./routes/queue.js";
+import { humanBridgeRoutes, humanAnswerRoutes, humanBridgeAdminRoutes } from "./routes/human-bridge.js";
+import { networkWriteAuth } from "./middleware/network-write-auth.js";
+import { getOpenRigHome } from "./openrig-compat.js";
+import type { HumanDecisionService } from "./domain/human-decision-service.js";
 import { workspaceRoutes } from "./routes/workspace.js";
 import { projectsRoutes } from "./routes/projects.js";
 import { viewsRoutes } from "./routes/views.js";
@@ -142,8 +146,13 @@ import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
+import { controllerRoutes } from "./routes/controllers.js";
 
 export interface AppDeps {
+  controllerService?: import("./domain/controller-service.js").ControllerService;
+  humanDecisionService?: HumanDecisionService;
+  humanBridgeHome?: string;
+  networkPeerAddress?: Parameters<typeof networkWriteAuth>[0]["peerAddress"];
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
   /** S20 — effective bind plan for the health surface (absent = legacy body). */
   bindPlan?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean; ignoredRoutingHost?: string };
@@ -165,6 +174,7 @@ export interface AppDeps {
   snapshotRepo: SnapshotRepository;
   /** Slice-04 OPR.0.5.0.4: the provider read-model/precheck/switch service. Routes 503 honestly if absent. */
   providerService?: ProviderService;
+  providerAccountManager?: import("./domain/provider/provider-account-manager.js").ProviderAccountManager;
   restoreOrchestrator: RestoreOrchestrator;
   // OPR.0.4.3.20 FR-4 — for refresh-before-serialize on the manual snapshot route.
   resumeMetadataRefresher?: import("./domain/resume-metadata-refresher.js").ResumeMetadataRefresher;
@@ -427,6 +437,7 @@ function fileResponse(filePath: string): Response {
   return new Response(body, {
     headers: {
       "content-type": contentType,
+      "cache-control": "no-store",
     },
   });
 }
@@ -494,6 +505,13 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   const app = new Hono();
+  app.use("*", networkWriteAuth({
+    home: deps.humanBridgeHome ?? getOpenRigHome(),
+    operatorTokens: [deps.missionControlBearerToken],
+    terminalToken: deps.terminalBearerToken,
+    activityHookToken: deps.activityHookToken,
+    peerAddress: deps.networkPeerAddress,
+  }));
   if (deps.requestPhaseObserver) app.use("*", deps.requestPhaseObserver.middleware());
   // A malformed request body is a 400, not the default 500.
   app.use("*", trackJsonBodyParseErrors);
@@ -504,6 +522,7 @@ export function createApp(deps: AppDeps): Hono {
   // Inject dependencies into context for all routes
   app.use("*", async (c, next) => {
     c.set("rigRepo" as never, deps.rigRepo);
+    c.set("controllerService" as never, deps.controllerService);
     c.set("sessionRegistry" as never, deps.sessionRegistry);
     c.set("eventBus" as never, deps.eventBus);
     c.set("nodeLauncher" as never, deps.nodeLauncher);
@@ -721,6 +740,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.route("/api/rigs", rigsRoutes);
+  app.route("/api/rigs/:rigId/controllers", controllerRoutes);
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   // Slice 24 — per-rig CMUX workspace launcher.
   app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);
@@ -781,6 +801,10 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/seat", seatRoutes);
   app.route("/api/rigs/:rigId/chat", chatRoutes());
   app.route("/api/stream", streamRoutes());
+  if (deps.humanDecisionService) app.route("/api/queue", humanAnswerRoutes(deps.humanDecisionService));
+  const bridgeNative = deps.queueRepo ? { home: deps.humanBridgeHome ?? getOpenRigHome(), queue: deps.queueRepo } : undefined;
+  app.route("/api/bridge", humanBridgeRoutes(deps.rigRepo.db, bridgeNative));
+  app.route("/api/bridge-admin", humanBridgeAdminRoutes(deps.rigRepo.db, bridgeNative));
   app.route("/api/queue", queueRoutes());
   app.route("/api/workspace", workspaceRoutes());
   app.route("/api/projects", projectsRoutes());

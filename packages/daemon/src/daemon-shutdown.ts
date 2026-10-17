@@ -26,6 +26,26 @@ interface StreamResponse {
   once(event: "close" | "finish", listener: () => void): unknown;
 }
 
+interface UpgradedSocket {
+  destroy(): unknown;
+  once(event: "close", listener: () => void): unknown;
+}
+const upgradedSockets = new WeakMap<object, { sockets: Set<UpgradedSocket>; closing: boolean }>();
+
+/** HTTP close does not drain WebSockets. Track only upgrades; native agent panes are unrelated. */
+export function trackHttpServerUpgrades(server: {
+  on(event: "upgrade", listener: (request: unknown, socket: UpgradedSocket) => void): unknown;
+}): void {
+  if (upgradedSockets.has(server)) return;
+  const state = { sockets: new Set<UpgradedSocket>(), closing: false };
+  upgradedSockets.set(server, state);
+  server.on("upgrade", (_request, socket) => {
+    if (state.closing) { socket.destroy(); return; }
+    state.sockets.add(socket);
+    socket.once("close", () => state.sockets.delete(socket));
+  });
+}
+
 const activeResponses = new WeakMap<object, {
   responses: Set<{ response: StreamResponse; contentType?: string }>;
   endLateStream?: (response: StreamResponse) => void;
@@ -68,8 +88,11 @@ export function trackHttpServerResponses(server: {
 export function closeHttpServer(server: ServerShutdownHandle, graceMs = DAEMON_HTTP_CONNECTION_GRACE_MS): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let settled = false;
+    const upgrades = upgradedSockets.get(server);
+    if (upgrades) upgrades.closing = true;
     const forceCloseTimer = setTimeout(() => {
       try {
+        for (const socket of upgrades?.sockets ?? []) socket.destroy();
         const state = activeResponses.get(server);
         if (state) state.endLateStream = (response) => {
           try { response.end(); } catch (error) { finish(error as Error); }

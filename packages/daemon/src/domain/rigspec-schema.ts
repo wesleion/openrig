@@ -27,6 +27,8 @@ import * as path from "node:path";
 // OPR.0.3.3.24: exported so the add_member converge op validates pod-local edge
 // kinds against the SAME canonical set as a rigspec pod-local edge (no second,
 // looser edge input path).
+import { validateSessionRenewal } from "./session-renewal-store.js";
+
 export const VALID_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_observe", "collaborates_with", "escalates_to"]);
 
 /** SPEC-VALIDATION CAPABILITY REGISTRY (B8-family, r2-ruled expiry coupling). Behavioral sentinel,
@@ -46,13 +48,13 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges", "non_interruptive",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "session_renewal",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "role", "permission_policy", "cwd", "restore_policy",
-  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref",
+  "model", "effort", "controller", "role", "permission_policy", "cwd", "restore_policy",
+  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "session_renewal",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -176,6 +178,7 @@ export class RigSpecSchema {
       if (refErr) errors.push(refErr);
     }
 
+    if (obj["session_renewal"] !== undefined) errors.push(...validateSessionRenewal(obj["session_renewal"], "session_renewal"));
     if (obj["non_interruptive"] !== undefined && typeof obj["non_interruptive"] !== "boolean") {
       errors.push("non_interruptive: must be a boolean");
     }
@@ -256,6 +259,7 @@ export class RigSpecSchema {
       cultureFile: raw["culture_file"] as string | undefined,
       permissionPolicy: raw["permission_policy"] as string | undefined,
       nonInterruptive: raw["non_interruptive"] as boolean | undefined,
+      sessionRenewal: raw["session_renewal"] as import("./session-renewal-store.js").SessionRenewalOverride | undefined,
       managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
@@ -440,6 +444,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   const prefix = `${podPrefix}.members[${index}]`;
   if (!isMapping(member)) return [`${prefix}: must be an object`];
   errors.push(...rejectUnknownTopologyKeys(member, MEMBER_KEYS, prefix));
+  if (member["session_renewal"] !== undefined) errors.push(...validateSessionRenewal(member["session_renewal"], `${prefix}.session_renewal`));
 
   // OPR.0.5.6.20 A5 — member-level compaction_strategy: all vocabulary decisions go
   // through the manifest's one canonical site; this leg only classifies the answer.
@@ -529,6 +534,15 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
 
   // Terminal sentinel validation: exact triple required
   const isTerminalRuntime = member["runtime"] === "terminal";
+  if (member["controller"] !== undefined) {
+    const controller = member["controller"] as Record<string, unknown> | null;
+    if (!isTerminalRuntime || !controller || typeof controller !== "object" || Array.isArray(controller)
+      || controller["kind"] !== "jev-flow" || typeof controller["config"] !== "string"
+      || !controller["config"].trim() || Object.keys(controller).some(k => !["kind", "config"].includes(k))
+      || /^[a-z]+:\/\//i.test(String(controller["config"]))) {
+      errors.push(`${prefix}.controller: requires terminal runtime and { kind: "jev-flow", config: local path }`);
+    }
+  }
   const isTerminalRef = member["agent_ref"] === "builtin:terminal";
   const isNoneProfile = member["profile"] === "none";
 
@@ -1145,6 +1159,8 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     codexConfigProfile: m["codex_config_profile"] as string | undefined,
     model: m["model"] as string | undefined,
     effort: typeof m["effort"] === "string" && m["effort"].trim() ? m["effort"].trim() : undefined,
+    controller: m["controller"] as import("./types.js").ControllerBinding | undefined,
+    sessionRenewal: m["session_renewal"] as import("./session-renewal-store.js").SessionRenewalOverride | undefined,
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
     cwd: m["cwd"] as string,

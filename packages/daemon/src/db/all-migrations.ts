@@ -99,11 +99,16 @@ import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_
 import type { Migration } from "./migrate.js";
 
 import { rigNonInterruptiveSchema } from "./migrations/095_rig_non_interruptive.js";
-import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
-import { threadPartMapSchema } from "./migrations/097_thread_part_map.js";
-import { queueTransitionsQitemIdOrderSchema } from "./migrations/098_queue_transitions_qitem_id_order.js";
-import { queueItemsRecoveryTagsSchema } from "./migrations/099_queue_items_recovery_tags.js";
+import { rigInstallRootSchema } from "./migrations/102_rig_install_root.js";
+import { threadPartMapSchema } from "./migrations/103_thread_part_map.js";
+import { queueTransitionsQitemIdOrderSchema } from "./migrations/104_queue_transitions_qitem_id_order.js";
+import { queueItemsRecoveryTagsSchema } from "./migrations/105_queue_items_recovery_tags.js";
 import { resumeRotationSchema } from "./migrations/101_claude_resume_rotation.js";
+import { humanBridgeSchema } from "./migrations/096_human_bridge.js";
+import { controllerTelemetryCompactionSchema } from "./migrations/097_controller_telemetry_compaction.js";
+import { sessionRenewalSchema } from "./migrations/098_session_renewal.js";
+import { providerAccountsSchema } from "./migrations/099_provider_accounts.js";
+import { providerAccountRepairsSchema } from "./migrations/100_provider_account_repairs.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -206,5 +211,10 @@ export const ALL_MIGRATIONS: Migration[] = [
   threadPartMapSchema,
   queueTransitionsQitemIdOrderSchema,
   queueItemsRecoveryTagsSchema,
+  humanBridgeSchema,
+  controllerTelemetryCompactionSchema,
+  sessionRenewalSchema,
+  providerAccountsSchema,
+  providerAccountRepairsSchema,
   resumeRotationSchema,
 ];

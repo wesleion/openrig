@@ -1,6 +1,7 @@
 import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 
 export interface Rig {
+  sessionRenewal?: import("./session-renewal-store.js").SessionRenewalOverride | null;
   id: string;
   name: string;
   createdAt: string;
@@ -26,7 +27,22 @@ export interface ContinuityState {
   updatedAt: string;
 }
 
+export interface ControllerBinding { kind: "jev-flow"; config: string }
+export interface ControllerStatus extends ControllerBinding {
+  available: boolean;
+  mode?: "off" | "observe" | "apply";
+  revision?: number;
+  changedAt?: string | null;
+  model?: string;
+  modelApplyEnabled?: boolean;
+  integration?: { worker: string; keyAvailable: boolean; provider?: unknown; lastCapture?: unknown; lastJudgment?: unknown;
+    counts?: Record<string, number>; captures?: Record<string, number>; coverage?: string; error?: string | null };
+  latest?: { status: string; createdAt: string; action: string | null; reason: string | null } | null;
+  error?: string;
+}
+
 export interface Node {
+  sessionRenewal?: import("./session-renewal-store.js").SessionRenewalOverride | null;
   id: string;
   rigId: string;
   logicalId: string;
@@ -34,6 +50,7 @@ export interface Node {
   runtime: string | null;
   model: string | null;
   effort?: string | null;
+  controller?: ControllerBinding | null;
   codexConfigProfile?: string | null;
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF (builtin:<name> or spec-relative custom
    *  path), or null when none is attached (= the floor). */
@@ -106,6 +123,7 @@ export interface Session {
 // -- Event types --
 
 export type RigEvent =
+  | { type: "seat.session_renewal"; rigId: string; nodeId: string; data: Record<string, unknown> }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
   | { type: "event.delivery_poisoned"; poisonedSeq: number; error: string; payloadSha: string }
   | { type: "rig.created"; rigId: string }
@@ -671,6 +689,8 @@ export interface NodeInventoryEntry {
   latestError: string | null;
   // Extended fields
   model: string | null;
+  effort?: string | null;
+  controller?: ControllerStatus | null;
   agentRef: string | null;
   profile: string | null;
   codexConfigProfile?: string | null;
@@ -717,6 +737,8 @@ export interface NodeInventoryEntry {
     needsInput: { count: number; reason: string | null };
     decidedBy: string | null;
     seq: number;
+    changedAt?: string;
+    activityStartedAt?: string;
     lastSwap: { generation: string; at: string } | null;
   } | null;
   /**
@@ -1082,6 +1104,7 @@ export interface StarterRefSpec {
 }
 
 export interface RigSpecPodMember {
+  sessionRenewal?: import("./session-renewal-store.js").SessionRenewalOverride;
   id: string;
   label?: string;
   agentRef: string;
@@ -1090,6 +1113,7 @@ export interface RigSpecPodMember {
   codexConfigProfile?: string;
   model?: string;
   effort?: string;
+  controller?: ControllerBinding;
   /**
    * OPR.0.4.6.FAC1: optional seat-side role declaration (writes the
    * existing `nodes.role` column via createMemberNode → addNode). The
@@ -1182,6 +1206,7 @@ export interface WorkspaceSpec {
 }
 
 export interface RigSpec {
+  sessionRenewal?: import("./session-renewal-store.js").SessionRenewalOverride;
   /** Authored launch-warning choice; an explicit launch option takes precedence. */
   nonInterruptive?: boolean;
   version: string;
@@ -1370,6 +1395,7 @@ export interface ExpansionPodFragment {
     cwd?: string;
     model?: string;
     codexConfigProfile?: string;
+    controller?: unknown;
     /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF — threaded through the
      *  expansion ingress exactly like role (never silently dropped). Typed UNKNOWN
      *  (R2 at 4ac243c3): the ingress preserves RAW presence — including null and other
@@ -1449,4 +1475,22 @@ export interface ContextUsage {
   sessionName: string | null;
   sampledAt: string | null;
   fresh: boolean;
+  lastInference?: {
+    inputTokens: number | null; outputTokens: number | null;
+    cachedInputTokens: number | null; totalTokens: number | null; at: string | null;
+    cacheCreationInputTokens?: number | null;
+  };
+  baselineInputTokens?: number | null;
+  contextInputTokens?: number | null;
+  contextInputSource?: "native" | "estimate" | null;
+  totalCachedInputTokens?: number | null;
+  execution?: {
+    startedAt: string | null; completedAt: string | null;
+    lastModelResponseAt: string | null; source: string | null;
+  };
+  runtimeMetadata?: {
+    model: string | null; effort: string | null; sampledAt: string | null; source: string | null;
+    effortDefault?: string | null;
+    effortDefaultSampledAt?: string | null;
+  };
 }

@@ -7,7 +7,7 @@ import type { Migration } from "../migrate.js";
 // thread_seat_map (072) it is a CACHE of the `slack-posted` stamps on the ask's queue row (a reply's
 // stamp names its own message_ts, the thread's thread_ts, its seat and its ask), so a lost table rebuilds.
 export const threadPartMapSchema: Migration = {
-  name: "097_thread_part_map.sql",
+  name: "103_thread_part_map.sql",
   sql: `
     CREATE TABLE thread_part_map (
       message_ts      TEXT NOT NULL,

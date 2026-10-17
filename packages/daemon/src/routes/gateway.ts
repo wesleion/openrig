@@ -12,6 +12,7 @@ import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import path from "node:path";
+import type Database from "better-sqlite3";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import { loadConfig, saveConfig } from "../domain/gateway/slack/config.js";
 import { SeenStore } from "../domain/gateway/slack/state-store.js";
@@ -21,6 +22,7 @@ import { OPENRIG_HOME } from "../openrig-compat.js";
 import { loadHumanRegistry } from "../domain/gateway/human-registry.js";
 import { resolveSecret } from "../domain/gateway/slack/secrets.js";
 import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../domain/gateway/human-readiness.js";
+import { resolveHermesReadiness } from "../domain/gateway/hermes-readiness.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import { runChannelOperation } from "../domain/gateway/channel-operations.js";
 import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
@@ -68,6 +70,9 @@ export function gatewayRoutes(opts: {
     if (!registry.ok) return c.json({ error: "human_registry_unavailable", message: registry.error }, 503);
     const human = registry.entities.find((candidate) => candidate.entityId === entityId);
     if (!human) return c.json({ error: "human_not_found", entityId }, 404);
+    if (human.connectorBindings.some(b => b.role === "primary" && b.kind === "hermes")) {
+      return c.json({ ok: true, readiness: resolveHermesReadiness(home, c.get("db" as never) as Database.Database | undefined, human) });
+    }
     const cfg = loadConfig(home);
     const botToken = resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined });
     const readiness = await resolveHumanDeliveryReadiness({ human, config: cfg, gatewayState, botToken });

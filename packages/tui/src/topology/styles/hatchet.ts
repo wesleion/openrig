@@ -8,6 +8,7 @@ import { GraphCanvas } from "../canvas.js";
 import { edgeToken } from "../glyphs.js";
 import { markText, runtimeMarkSegs } from "../runtime-marks.js";
 import type { GraphContainer, GraphLayout, PlacedNode } from "../layout.js";
+import { fitGraphText } from "../layout.js";
 import type { Action, ResourceTarget } from "../../types.js";
 
 export interface StyleContext {
@@ -35,15 +36,17 @@ export function drawNodeBox(canvas: GraphCanvas, p: PlacedNode, ctx: StyleContex
   canvas.text(p.x + 2, p.y + 1, p.glyph.glyph, p.glyph.token, true);
   canvas.text(p.x + 4, p.y + 1, p.title, "bright", selected);
   if (p.glyph.overlay) canvas.text(p.x + 4 + p.title.length + 2, p.y + 1, p.glyph.overlay, "warn", true);
-  // S19 MR2: runtime renders as the web-family MARK + adjacent ctx%
+  // Keep the runtime mark colored; render the same metadata used to size the box.
   let mx = p.x + 2;
   for (const seg of runtimeMarkSegs(p.node.data.runtime)) {
     canvas.text(mx, p.y + 2, seg.text, seg.token, seg.bold, );
     if (seg.bg) for (let i = 0; i < seg.text.length; i++) canvas.set(mx + i, p.y + 2, seg.text[i]!, seg.token, seg.bold, seg.bg);
     mx += seg.text.length;
   }
-  const ctxText = ` ${p.node.data.contextUsedPercentage == null ? "—" : `${Math.round(p.node.data.contextUsedPercentage)}%`}`;
-  canvas.text(mx, p.y + 2, ctxText, "dim");
+  const markWidth = markText(runtimeMarkSegs(p.node.data.runtime)).length;
+  const metadataLines = p.metaLines ?? [p.metaLine];
+  canvas.text(mx, p.y + 2, metadataLines[0]!.slice(markWidth), "dim");
+  for (let i = 1; i < metadataLines.length; i++) canvas.text(p.x + 2, p.y + 2 + i, metadataLines[i]!, "dim");
   // the WHOLE box is the hit surface — every row emits the same drill action
   const action = drillAction(p, ctx);
   for (let row = 0; row < p.h; row++) canvas.zone(p.y + row, p.x, p.x + p.w, action);
@@ -120,16 +123,22 @@ export function drawEdge(canvas: GraphCanvas, from: PlacedNode, to: PlacedNode, 
  * their interiors; agent boxes stay opaque+protected on top. */
 export function drawContainers(canvas: GraphCanvas, layout: GraphLayout, ctx: StyleContext): void {
   for (const c of layout.containers) {
+    canvas.box(c.x, c.y, c.w, c.h, c.kind === "rig" ? "accent" : "chrome", c.kind === "rig", false);
+  }
+  drawContainerLabels(canvas, layout, ctx);
+}
+
+/** Wrapped edge corridors may cross a header; repaint labels without changing hit order. */
+export function drawContainerLabels(canvas: GraphCanvas, layout: GraphLayout, ctx: StyleContext, includeZones = true): void {
+  for (const c of layout.containers) {
     if (c.kind === "rig") {
-      canvas.box(c.x, c.y, c.w, c.h, "accent", true, false);
-      const tab = ` ▦ RIG ${c.name || ctx.rig} `; // round-3 rig glyph
+      const tab = fitGraphText(` ▦ RIG ${c.name || ctx.rig} `, c.w - 4);
       canvas.text(c.x + 2, c.y, tab, "accent", true);
-      canvas.zone(c.y, c.x + 2, c.x + 2 + tab.length, { type: "drill", resource: "rig", name: c.name || ctx.rig, target: { host: ctx.host } });
+      if (includeZones) canvas.zone(c.y, c.x + 2, c.x + 2 + tab.length, { type: "drill", resource: "rig", name: c.name || ctx.rig, target: { host: ctx.host } });
     } else {
-      canvas.box(c.x, c.y, c.w, c.h, "chrome", false, false);
-      const tab = ` ≡ ${c.name} `; // round-3 pod glyph
+      const tab = fitGraphText(` ≡ ${c.name} `, c.w - 3);
       canvas.text(c.x + 1, c.y, tab, "accent", true);
-      canvas.zone(c.y, c.x + 1, c.x + 1 + tab.length, { type: "drill", resource: "pod", name: c.name, target: { host: ctx.host, rig: ctx.rig } });
+      if (includeZones) canvas.zone(c.y, c.x + 1, c.x + 1 + tab.length, { type: "drill", resource: "pod", name: c.name, target: { host: ctx.host, rig: ctx.rig } });
     }
   }
 }
@@ -151,6 +160,7 @@ export function renderHatchet(layout: GraphLayout, ctx: StyleContext, width: num
   }
   for (const p of layout.placed) drawNodeBox(canvas, p, ctx);
   for (const a of arrows) canvas.set(a.x, a.y, a.ch, a.token, true);
+  drawContainerLabels(canvas, layout, ctx, false);
   drawClipIndicator(canvas, layout, width);
   return canvas;
 }

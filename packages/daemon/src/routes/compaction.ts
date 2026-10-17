@@ -136,7 +136,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ok: false, error: "Missing required query param: session" }, 400);
     }
     const preparation = enforcer.getPreparationState(session);
-    return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation,
+    return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation, history: enforcer.getPreparationHistory(session),
       ...(preparation?.reason === "occupant_generation_unavailable"
         ? { guidance: manualReasonMessage(session, preparation.reason) } : {}),
     });

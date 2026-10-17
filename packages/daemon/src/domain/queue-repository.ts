@@ -142,6 +142,7 @@ export const QUEUE_PRIORITIES = ["routine", "urgent", "critical"] as const;
 export type QueuePriority = (typeof QUEUE_PRIORITIES)[number];
 
 export interface QueueItem {
+  revision: number;
   qitemId: string;
   tsCreated: string;
   tsUpdated: string;
@@ -698,6 +699,9 @@ export interface QueueDestinationAdvisory {
 }
 
 export class QueueRepository {
+  private beforeWake?: (qitemId: string, destination: string) => Promise<{ ok: boolean; destination?: string; reason?: string }>;
+
+  attachBeforeWake(prepare: NonNullable<QueueRepository["beforeWake"]>): void { this.beforeWake = prepare; }
   readonly db: Database.Database;
   readonly transitionLog: QueueTransitionLog;
   private readonly eventBus: EventBus;
@@ -1364,6 +1368,11 @@ export class QueueRepository {
     }
     if (destClass.class === "unroutable") {
       return { classified: "failed", nudgeResult: destClass.teaching };
+    }
+    if (this.beforeWake) {
+      const prepared = await this.beforeWake(qitemId, destinationSession);
+      if (!prepared.ok) return { classified: "failed", nudgeResult: `failed:${prepared.reason ?? "renewal_destination_unverified"}` };
+      destinationSession = prepared.destination ?? destinationSession;
     }
     const stampISO = new Date().toISOString();
     let text: string;
@@ -3386,7 +3395,7 @@ export class QueueRepository {
       SELECT q.*, r.ts AS delivered_at, r.transition_note AS delivery_receipt
       FROM queue_items q JOIN (${receipts}) r ON r.qitem_id = q.qitem_id
       WHERE q.human_intent = 'update' AND is_human_seat_session(q.destination_session) = 1
-        AND r.transition_note LIKE 'slack-owner-notification-posted %'
+        AND (r.transition_note LIKE 'slack-owner-notification-posted %' OR r.transition_note LIKE 'http-owner-notification-posted %')
       ORDER BY r.ts DESC, q.qitem_id DESC LIMIT ?
     `).all(limit) as Array<QueueItemRow & { delivered_at: string; delivery_receipt: string }>;
     return rows.map((row) => ({ ...this.rowToItem(row), deliveredAt: row.delivered_at, deliveryReceipt: row.delivery_receipt }));
@@ -3574,6 +3583,7 @@ export class QueueRepository {
          OR EXISTS (SELECT 1 FROM queue_transitions receipt
                       WHERE receipt.qitem_id = queue_items.qitem_id
                         AND (receipt.transition_note LIKE 'slack-owner-notification-posted %'
+                          OR receipt.transition_note LIKE 'http-owner-notification-posted %'
                           OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %')))`,
     ];
     const params: unknown[] = [];
@@ -3746,13 +3756,14 @@ export class QueueRepository {
     const notes = this.db.prepare(
       `SELECT transition_note FROM queue_transitions
         WHERE qitem_id = ? AND (transition_note LIKE 'slack-owner-notification-posted %'
+                             OR transition_note LIKE 'http-owner-notification-posted %'
                              OR transition_note LIKE 'slack-owner-notification-transport-failed %')
         ORDER BY transition_id DESC`,
     ).all(qitemId) as Array<{ transition_note: string }>;
     const currentNotes = episode
       ? notes.filter((note) => note.transition_note.split(/\s+/).includes(`notification_key=${episode.notificationKey}`))
       : notes;
-    const posted = currentNotes.find((note) => note.transition_note.startsWith("slack-owner-notification-posted "));
+    const posted = currentNotes.find((note) => note.transition_note.startsWith("slack-owner-notification-posted ") || note.transition_note.startsWith("http-owner-notification-posted "));
     if (posted) return { outcome: "posted", detail: posted.transition_note, episode };
     const failed = currentNotes.find((note) => note.transition_note.startsWith("slack-owner-notification-transport-failed "));
     if (failed) return { outcome: "transport-failed", detail: failed.transition_note, episode };
@@ -4030,6 +4041,7 @@ export class QueueRepository {
       replyTo: row.reply_to ?? null,
       humanQuestions: row.human_questions ? (JSON.parse(row.human_questions) as HumanQuestion[]) : null,
       humanAnswers: row.human_answers ? (JSON.parse(row.human_answers) as HumanAnswers) : null,
+      revision: (row as QueueItemRow & { human_revision?: number }).human_revision ?? 1,
       closureReason: row.closure_reason as ClosureReason | null,
       closureTarget: row.closure_target,
       closureRequiredAt: row.closure_required_at,

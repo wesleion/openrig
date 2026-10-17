@@ -655,6 +655,7 @@ export class PodRigInstantiator {
         if (rigSpec.workspace) {
           this.deps.rigRepo.setRigWorkspace(materializedRigId, rigSpec.workspace);
         }
+        if (rigSpec.sessionRenewal) this.deps.rigRepo.setRigSessionRenewal(materializedRigId, rigSpec.sessionRenewal);
         // #25: the Claude managed-block destination is rig-row state (both persist sites).
         if (rigSpec.managedBlocks?.["claude-code"]) {
           this.deps.rigRepo.setRigClaudeManagedBlockFile(materializedRigId, rigSpec.managedBlocks["claude-code"]);
@@ -1349,6 +1350,7 @@ export class PodRigInstantiator {
       if (rigSpec.workspace) {
         this.deps.rigRepo.setRigWorkspace(rigId, rigSpec.workspace);
       }
+      if (rigSpec.sessionRenewal) this.deps.rigRepo.setRigSessionRenewal(rigId, rigSpec.sessionRenewal);
       // #25: the second rig-persist site (see materializeValidatedSpec).
       if (rigSpec.managedBlocks?.["claude-code"]) {
         this.deps.rigRepo.setRigClaudeManagedBlockFile(rigId, rigSpec.managedBlocks["claude-code"]);
@@ -1522,6 +1524,7 @@ export class PodRigInstantiator {
             podId,
             agentRef: member.agentRef,
             profile: member.profile,
+            sessionRenewal: member.sessionRenewal,
             label: member.label,
             resolvedSpecName: configResult.config.resolvedSpecName,
             resolvedSpecVersion: configResult.config.resolvedSpecVersion,
@@ -1798,6 +1801,8 @@ export class PodRigInstantiator {
         runtime: member.runtime,
         model: member.model,
         effort: member.effort,
+        controller: member.controller ? { ...member.controller, config: nodePath.resolve(effectiveCwd, member.controller.config) } : undefined,
+        sessionRenewal: member.sessionRenewal,
         cwd: effectiveCwd,
         restorePolicy: "checkpoint_only",
         podId,
@@ -1868,6 +1873,8 @@ export class PodRigInstantiator {
       runtime: input.member.runtime,
       model: input.member.model,
       effort: input.member.effort,
+      controller: input.member.controller ? { ...input.member.controller, config: nodePath.resolve(effectiveCwd, input.member.controller.config) } : undefined,
+      sessionRenewal: input.member.sessionRenewal,
       codexConfigProfile: input.member.codexConfigProfile,
       // OPR.0.4.8.3 Seam B: the member's OWN raw ref persists on the node (like role);
       // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.

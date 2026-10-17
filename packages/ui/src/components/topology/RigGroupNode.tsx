@@ -110,7 +110,7 @@ function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
           <div className="flex flex-col gap-0.5 min-w-0">
             <div className="font-mono text-[9px] uppercase tracking-wider text-on-surface-variant">
               {podCount !== undefined ? `${podCount} pods / ` : ""}
-              {nodeCount} agent{nodeCount === 1 ? "" : "s"}
+              {nodeCount} member{nodeCount === 1 ? "" : "s"}
             </div>
             <div className="font-mono text-[9px] text-on-surface-variant">
               {displayedActiveCount} active
@@ -124,7 +124,7 @@ function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
         >
           <span>{podCount !== undefined ? `${podCount} pods` : ""}</span>
           {podCount !== undefined ? <span>/</span> : null}
-          <span>{nodeCount} agents</span>
+          <span>{nodeCount} members</span>
           <span>/</span>
           <span>{displayedActiveCount} active</span>
         </div>

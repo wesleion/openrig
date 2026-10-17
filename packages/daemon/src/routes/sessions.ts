@@ -168,7 +168,9 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   // always present, so "not yet known" is a value, never an absence a consumer can misread.
   // selfHostId ONLY — never host.name (display-only; the DP4 conflation healthz already refuses).
   const hostSelfId = getSelfHostId();
-  return c.json(withTerminalAndWork.map((n) => ({ ...n, hostSelfId })));
+  const controllerService = c.get("controllerService" as never) as import("../domain/controller-service.js").ControllerService | undefined;
+  const enriched = controllerService ? await controllerService.enrich(withTerminalAndWork) : withTerminalAndWork;
+  return c.json(enriched.map((n) => ({ ...n, hostSelfId })));
 });
 
 // GET /api/rigs/:rigId/nodes/:logicalId — node detail
@@ -192,6 +194,7 @@ nodesRoutes.get("/:logicalId", async (c) => {
   });
   Object.assign(detail, {
     agentActivity: detailWithTerminalAndWork?.agentActivity,
+    activityState: detailWithTerminalAndWork?.activityState,
     terminalActive: detailWithTerminalAndWork?.terminalActive,
     // ARCH RULING 3a947fb1: serve the raw lastActivityAt fact on node-detail too
     // (the list route serves the whole entry wholesale) — same per-seat surface.
@@ -241,6 +244,8 @@ nodesRoutes.get("/:logicalId", async (c) => {
     };
   }
 
+  const controllerService = c.get("controllerService" as never) as import("../domain/controller-service.js").ControllerService | undefined;
+  if (detail.controller && controllerService) detail.controller = await controllerService.status(rigId, detail.nodeId);
   return c.json(detail);
 });
 

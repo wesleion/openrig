@@ -17,6 +17,7 @@ import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforc
 import { compactionRoutes } from "../src/routes/compaction.js";
 import { sessionAdminRoutes } from "../src/routes/sessions.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
+import { claudeCompactionPane } from "./helpers/managed-compaction-pane.js";
 
 const seat = "writer@test-rig", node = "test-node";
 const input = { sessionName: seat, runtime: "claude-code", usedPercentage: 90 };
@@ -51,7 +52,7 @@ function fixture(kind: "legacy" | "fresh" | "adopt" = "legacy", primaryMiss = fa
   const guard = new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name));
   guard.recoverActivation();
   const writes: string[] = [], keys: string[][] = [];
-  let clock = Date.now(), onSleep: (() => Promise<void>) | undefined;
+  let clock = Date.now(), onSleep: (() => Promise<void>) | undefined, staged = "";
   const tmux: any = {
     deliveryGuard: guard,
     probeSession: vi.fn(async () => ({ state: "present" })),
@@ -59,8 +60,9 @@ function fixture(kind: "legacy" | "fresh" | "adopt" = "legacy", primaryMiss = fa
     listPanes: vi.fn(async () => [{ id: "%1" }]),
     getPaneCommand: vi.fn(async () => "claude"),
     setSessionOption: vi.fn(async () => ({ ok: true })),
-    sendText: vi.fn(async (_: string, text: string) => { writes.push(text); return { ok: true }; }),
-    sendKeys: vi.fn(async (_: string, k: string[]) => { keys.push(k); return { ok: true }; }),
+    capturePaneContent: vi.fn(async () => claudeCompactionPane("idle", staged)),
+    sendText: vi.fn(async (_: string, text: string, beforeInput?: () => void | Promise<void>) => { await beforeInput?.(); staged=text; writes.push(text); return { ok: true }; }),
+    sendKeys: vi.fn(async (_: string, k: string[], beforeInput?: () => void | Promise<void>) => { await beforeInput?.(); keys.push(k); staged=""; return { ok: true }; }),
   };
   const transport = new SessionTransport({
     db, rigRepo, sessionRegistry: registry, tmuxAdapter: tmux,

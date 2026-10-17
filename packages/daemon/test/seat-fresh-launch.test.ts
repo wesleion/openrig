@@ -662,6 +662,17 @@ describe("SeatLifecycleService.launchFresh", () => {
     });
   });
 
+  it("refuses a removed runtime resource before stopping an existing occupant", async () => {
+    const seat = seedSeat();
+    const entry = { category: "runtime_resource", effectiveId: "removed-mcp", sourceSpec: "fixture", sourcePath: "/missing-spec", resourcePath: "mcp.toml", absolutePath: "/openrig-fixture-missing-resource/mcp.toml", resourceType: "codex_config_fragment" };
+    db.prepare("UPDATE node_startup_context SET projection_entries_json = ? WHERE node_id = ?").run(JSON.stringify([entry]), seat.node.id);
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "stale context" });
+    expect(result).toMatchObject({ ok: false, code: "startup_context_stale" });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(alive.has(seat.sessionName)).toBe(true);
+    expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxPane).toBe("%old");
+  });
+
   it("keeps a fresh occupant alive when its startup prompt remains staged", async () => {
     const seat = seedSeat({ clean: true });
     db.prepare("UPDATE node_startup_context SET startup_actions_json = ? WHERE node_id = ?").run(

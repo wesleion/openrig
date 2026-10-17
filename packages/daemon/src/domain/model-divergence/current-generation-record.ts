@@ -26,7 +26,7 @@ export interface CurrentGenerationDeps {
 }
 
 export type CurrentRecordResolution =
-  | { ok: true; id: string }
+  | { ok: true; id: string; pid?: number; startedAt?: string }
   | { ok: false; reason: string };
 
 export interface ClaudeOccupantRecordInput {
@@ -223,13 +223,17 @@ export async function resolveLiveCodexThreadId(
   if (!panePid) return { ok: false, reason: `no live pane pid for ${sessionTarget}` };
   const processes = await deps.listProcesses();
   const codexPids = findDescendants(processes, panePid, commandBasenameIs("codex"));
+  const paneProcess = processes.find(p => p.pid === panePid);
+  if (paneProcess && commandBasenameIs("codex")(paneProcess.command)) codexPids.unshift(panePid);
   if (codexPids.length === 0) return { ok: false, reason: `no codex process under the live pane of ${sessionTarget}` };
   const ids = new Set<string>();
+  const resolved: Array<{ id: string; pid: number; startedAt?: string }> = [];
   for (const pid of codexPids) {
-    const threadId = await deps.readThreadIdByPid(pid, processes.find((p) => p.pid === pid)?.startedAt);
-    if (threadId) ids.add(threadId);
+    const startedAt = processes.find((p) => p.pid === pid)?.startedAt;
+    const threadId = await deps.readThreadIdByPid(pid, startedAt);
+    if (threadId) { ids.add(threadId); resolved.push({ id: threadId, pid, startedAt }); }
   }
-  if (ids.size === 1) return { ok: true, id: [...ids][0]! };
+  if (ids.size === 1) return { ok: true, ...resolved[0]! };
   if (ids.size > 1) return { ok: false, reason: `multiple codex threads under the live pane of ${sessionTarget}` };
   return { ok: false, reason: `live codex process under ${sessionTarget} yielded no thread id from its logs` };
 }

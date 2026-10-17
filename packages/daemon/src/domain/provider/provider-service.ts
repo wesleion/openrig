@@ -14,6 +14,7 @@ export interface ProviderSwitchInput {
   seat: string;
   toAccount: string;
   forceUnsafe: boolean;
+  whenIdle?: boolean;
 }
 
 /**
@@ -34,4 +35,7 @@ export interface ProviderService {
   precheck(input: ProviderPrecheckInput): Promise<PrecheckResult>;
   /** Precheck-gated switch; returns an explicit business outcome (never a transport error). */
   switchAccount(input: ProviderSwitchInput): Promise<ProviderSwitchResult>;
+  rotation?(rig?: string): unknown;
+  setRotation?(rig: string, enabled: boolean): unknown;
+  register?(account: string): unknown;
 }

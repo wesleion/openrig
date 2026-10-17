@@ -26,6 +26,10 @@
       "types": "./dist/gateway-human-registry-surface.d.ts",
       "import": "./dist/gateway-human-registry-surface.js"
     },
+    "./gateway-human-bridge": {
+      "types": "./dist/domain/gateway/human-bridge-config.d.ts",
+      "import": "./dist/domain/gateway/human-bridge-config.js"
+    },
     "./gateway-protocol": {
       "types": "./dist/gateway-protocol-surface.d.ts",
       "import": "./dist/gateway-protocol-surface.js"

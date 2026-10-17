@@ -43,6 +43,7 @@ interface NodeLauncherDeps {
   tmuxAdapter: TmuxAdapter;
   transcriptStore?: TranscriptStore;
   sessionEnv?: Record<string, string | undefined>;
+  accountEnvironment?: (session: string, runtime?: string) => Record<string, string>;
   /** Extra launch env for one runtime only (OMP's provider keys), merged over
    *  sessionEnv so other runtimes' seats never receive it. */
   runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
@@ -69,6 +70,7 @@ export class NodeLauncher {
   private tmuxAdapter: TmuxAdapter;
   private transcriptStore: TranscriptStore | null;
   private sessionEnv: Record<string, string>;
+  private accountEnvironment?: NodeLauncherDeps["accountEnvironment"];
   private runtimeSessionEnv: Record<string, Record<string, string | undefined>>;
   private defaultSilenceWindowSeconds: number;
   private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
@@ -93,6 +95,7 @@ export class NodeLauncher {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.sessionEnv = compactEnv(deps.sessionEnv ?? {});
+    this.accountEnvironment = deps.accountEnvironment;
     this.runtimeSessionEnv = deps.runtimeSessionEnv ?? {};
     this.defaultSilenceWindowSeconds = deps.defaultSilenceWindowSeconds ?? 3;
     this.tmuxOptionDefaults = deps.tmuxOptionDefaults ?? null;
@@ -145,6 +148,7 @@ export class NodeLauncher {
       OPENRIG_RUNTIME: node.runtime ?? undefined,
       ...this.sessionEnv,
       ...(node.runtime ? this.runtimeSessionEnv[node.runtime] : undefined),
+      ...this.accountEnvironment?.(sessionName, node.runtime ?? undefined),
       OPENRIG_OCCUPANT_GENERATION: occupantGeneration ?? undefined,
     });
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;

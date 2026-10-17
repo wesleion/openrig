@@ -25,6 +25,8 @@ export interface ComposedPane {
   seat: string;
   /** Runtime recorded for a live seat, when available. */
   runtime?: string;
+  /** A registered tool monitor, rather than an interactive agent conversation. */
+  controller?: string;
   /** Human pane label — `<agent> · <slice>` per AC-7. */
   label: string;
   /** Provider-neutral shell command; a provider may wrap it using runtime metadata. */

@@ -127,7 +127,7 @@ describe("post-compact drain readiness without a usage sample", () => {
         if (deliver) return realTransport.send(name, text, opts as never);
         preparation.push(text);
         const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
-        const target = text.match(/Write this attempt's complete restore map to ("(?:[^"\\]|\\.)*")/);
+        const target = text.match(/atomically rename it to ("(?:[^"\\]|\\.)*")/);
         if (marker && target) {
           const file = JSON.parse(target[1]!) as string;
           mkdirSync(dirname(file), { recursive: true });

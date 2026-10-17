@@ -974,7 +974,7 @@ exit 7
       expect(source.split(seam), change).toHaveLength(2);
       const replacement = change === "type"
         ? `fs.rmSync(${JSON.stringify(linkPath)}); fs.writeFileSync(${JSON.stringify(linkPath)}, "changed type");`
-        : `fs.rmSync(${JSON.stringify(linkPath)}); fs.symlinkSync(${JSON.stringify(change === "payload" ? "changed-target" : linkTarget)}, ${JSON.stringify(linkPath)}, "dir");`;
+        : `${change === "inode" ? `fs.renameSync(${JSON.stringify(linkPath)}, ${JSON.stringify(path.join(root, "held-pre-mutation-inode"))});` : `fs.rmSync(${JSON.stringify(linkPath)});`} fs.symlinkSync(${JSON.stringify(change === "payload" ? "changed-target" : linkTarget)}, ${JSON.stringify(linkPath)}, "dir");`;
       fs.writeFileSync(interposedHelperPath, source.replace(seam, `  try {\n    ${replacement}\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
 
       const result = runJsonFileResult(interposedHelperPath, [
@@ -1027,7 +1027,8 @@ exit 7
 
       const movedLink = path.join(prepared.fixture.home, "context", "linked-pack");
       const original = fs.lstatSync(movedLink);
-      fs.rmSync(movedLink);
+      if (change === "inode") fs.renameSync(movedLink, path.join(root, "held-rollback-inode"));
+      else fs.rmSync(movedLink);
       if (change === "type") fs.writeFileSync(movedLink, "changed type");
       else fs.symlinkSync(change === "payload" ? "changed-target" : linkTarget, movedLink, "dir");
       const settingsBefore = fs.readFileSync(prepared.fixture.settingsPath);

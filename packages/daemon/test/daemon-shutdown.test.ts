@@ -1,15 +1,29 @@
 import fs from "node:fs";
 import { createServer, get as httpGet } from "node:http";
 import { once } from "node:events";
+import { connect } from "node:net";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_TIMEOUT_MS, trackHttpServerResponses } from "../src/daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_TIMEOUT_MS, trackHttpServerResponses, trackHttpServerUpgrades } from "../src/daemon-shutdown.js";
 
 const dirs: string[] = [];
+it("drains an upgraded terminal connection within the HTTP grace period", async () => {
+  const server = createServer(); trackHttpServerUpgrades(server);
+  server.on("upgrade", (_req, socket) => socket.write("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"));
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const client = connect((server.address() as { port: number }).port, "127.0.0.1");
+  try {
+    await once(client, "connect");
+    client.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+    await once(client, "data");
+    const closed = once(client, "close");
+    await closeHttpServer(server, 10); await closed;
+  } finally { client.destroy(); server.close(); }
+});
 afterEach(() => { vi.useRealTimers(); for (const p of dirs.splice(0)) fs.rmSync(p, { recursive: true, force: true }); });
 function fixture(phases: Array<[string, () => unknown]>, timeoutMs?: number) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shutdown-unit-")); dirs.push(dir);

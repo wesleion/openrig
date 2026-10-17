@@ -10,6 +10,9 @@ export interface GraphNodeData {
   podLabel?: string | null;
   runtime: string | null;
   model: string | null;
+  effort?: string | null;
+  controller?: import("../types.js").ControllerView | null;
+  runtimeMetadata?: import("../types.js").RuntimeMetadataView;
   /** latest session status verbatim (null = no session) */
   status: string | null;
   nodeKind: "agent" | "infrastructure";

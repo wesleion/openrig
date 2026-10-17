@@ -143,12 +143,16 @@ import { SettingsStore as ContextPackSettingsStore } from "./domain/user-setting
 import { WhoamiService } from "./domain/whoami-service.js";
 import { NodeCmuxService } from "./domain/node-cmux-service.js";
 import { createAppWithWebSocket, type AppDeps } from "./server.js";
+import { wireSessionRenewal } from "./domain/session-renewal-wiring.js";
+import { SeatAccountHomes } from "./domain/provider/seat-account-homes.js";
+import { ProviderAccountManager } from "./domain/provider/provider-account-manager.js";
 import { ProviderServiceImpl } from "./domain/provider/provider-service-impl.js";
 import { collectClaudeSignalsFromProviderUsageDirectory } from "./domain/provider/claude-usage-reader.js";
 import { legacyProviderUsageDirectory, providerUsageDirectory } from "./domain/telemetry-state-paths.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
+import { resolveSeatCodexHome } from "./domain/seat-account-home.js";
 import nodePath from "node:path";
 // Slice 11 (release-0.3.1 workflow-spec-folder-discovery) — adds
 // status + error_message columns to workflow_specs so the scanner
@@ -496,6 +500,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // global default; per-seat windows are not wired to the live poll).
   const seatActivityService = new SeatActivityService({
     tmux: tmuxAdapter,
+    db,
+    resolveOccupantGeneration: nodeId => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
     defaultWindowSeconds: 3,
     eventBus,
     // S19 — the Claude self-report rung (pid.json), consulted per sweep for seats whose
@@ -599,7 +605,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
   });
   const { SeatLaunchEnvironment } = await import("./domain/seat-launch-environment.js");
-  const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome);
+  const seatAccountHomes = new SeatAccountHomes(nodePath.join(daemonHome, ".agent-homes"));
+  const accountEnvironment = (session: string, runtime?: string) => seatAccountHomes.environment(session, runtime);
+  const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome, accountEnvironment);
   const nodeLauncher = new NodeLauncher({
     db,
     rigRepo,
@@ -608,6 +616,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     tmuxAdapter,
     transcriptStore,
     sessionEnv: launchSessionEnv,
+    accountEnvironment,
     runtimeSessionEnv,
     tmuxOptionDefaults,
   });
@@ -617,7 +626,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
   const claudeManagedLaunch = new ClaudeManagedLaunch(db, { ...launchSessionEnv, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }, {
     OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN: process.env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN,
-  });
+  }, accountEnvironment);
   const claudeResume = new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch, seatLaunchEnvironment });
   // #275: one reader for both Codex launch adapters, with the PATH, HOME and CODEX_HOME a seat session gets.
   const readCodexNetworkDefault = codexNetworkDefaultReader({ launchPath: process.env.PATH, home: daemonHome, codexHome });
@@ -781,6 +790,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
   const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
   const codexAdapter = new CodexRuntimeAdapter({ prepareTeamWorkspace, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs") });
+  codexAdapter.setSeatHomeResolver(binding => binding.tmuxSession
+    ? seatAccountHomes.resolve(binding.tmuxSession, "codex")?.home : undefined);
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
   const piAdapter = new PiRuntimeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m) }, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath });
@@ -1102,7 +1113,53 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // GHOST-STAGE (c-id): reject context readings from before the live occupant booted (prior
     // generation) so a frozen pre-handover sample can't drive the threshold. null = UNKNOWN (inert).
     resolveOccupantBootAt: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.bootAt ?? null,
+    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
   });
+  const { ProcessCensus: ContextProcessCensus } = await import("./domain/process-census.js");
+  const { CodexThreadIdResolver: ContextThreadIdResolver } = await import("./domain/codex-thread-id.js");
+  const { resolveCodexHomeByPid } = await import("./domain/native-codex-observation.js");
+  const { resolveLiveCodexThreadId: resolveContextCodexThread } = await import("./domain/model-divergence/current-generation-record.js");
+  const contextProcessCensus = new ContextProcessCensus();
+  const contextThreadResolvers = new Map<string, InstanceType<typeof ContextThreadIdResolver>>();
+  const codexRootForProcess = async (pid: number, identity?: string) => {
+    if (!identity) return null;
+    return process.platform === "linux" ? resolveCodexHomeByPid(pid, identity)
+      : configuredCodexHome ?? nodePath.join(os.homedir(), ".codex");
+  };
+  const contextGenerationDeps = {
+    getPanePid: async (target: string) => tmuxAdapter.getPanePid(target),
+    listProcesses: () => contextProcessCensus.list(),
+    readThreadIdByPid: async (pid: number, identity?: string) => {
+      const root = await codexRootForProcess(pid, identity);
+      if (!root || !identity) return undefined;
+      let resolver = contextThreadResolvers.get(root);
+      if (!resolver) {
+        if (contextThreadResolvers.size >= 32) contextThreadResolvers.delete(contextThreadResolvers.keys().next().value!);
+        resolver = new ContextThreadIdResolver({ codexHome: root }); contextThreadResolvers.set(root, resolver);
+      }
+      return resolver.resolve(pid, identity);
+    },
+  };
+  const codexResolutionFailures = new Map<string, string>();
+  const resolveCodexRuntime = async (sessionName: string, nodeId: string) => {
+    const unavailable = (reason: string) => {
+      if (codexResolutionFailures.get(nodeId) !== reason) console.warn(`[context-codex] ${sessionName}: ${reason}`);
+      codexResolutionFailures.set(nodeId, reason);
+      return null;
+    };
+    const generation = sessionRegistry.currentOccupantGenerationForSession(sessionName);
+    const binding = sessionRegistry.getBindingForNode(nodeId);
+    if (!generation) return unavailable("occupant generation unavailable");
+    if (!binding?.tmuxPane || binding.tmuxSession !== sessionName) return unavailable("canonical pane binding unavailable");
+    const live = await resolveContextCodexThread(binding.tmuxPane, contextGenerationDeps);
+    if (!live.ok) return unavailable(live.reason);
+    if (!live.pid || !live.startedAt) return unavailable("native process identity unavailable");
+    const codexHome = await codexRootForProcess(live.pid, live.startedAt);
+    if (!codexHome) return unavailable("native account home unavailable");
+    if (generation !== sessionRegistry.currentOccupantGenerationForSession(sessionName)) return unavailable("occupant changed during observation");
+    codexResolutionFailures.delete(nodeId);
+    return { threadId: live.id, codexHome, generationUuid: generation };
+  };
   const { HealthProjectionService, LiveContextHealthSource } = await import("./domain/health-detectors.js");
   const healthSettingsStore = new ContextPackSettingsStore();
   const contextHealthSource = new LiveContextHealthSource({
@@ -1818,6 +1875,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // NodeInventoryEntry → the composer's minimal LiveSeatRow (single-host
     // inventory: the canonical session name IS the tmux session; no host field).
     const toLiveSeatRow = (e: {
+      rigId?: string;
+      nodeId?: string;
+      controller?: { kind: string } | null;
       canonicalSessionName: string | null;
       attachmentType?: "tmux" | "external_cli" | null;
       runtime?: string | null;
@@ -1830,6 +1890,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       tmuxSession: e.canonicalSessionName,
       rigName: e.rigName,
       logicalId: e.logicalId,
+      ...(e.controller ? { controller: (() => {
+        try {
+          if (!e.rigId || !e.nodeId || !deps.controllerService) throw Error("controller_unavailable");
+          return { kind: e.controller.kind, command: deps.controllerService.monitorCommand(e.rigId, e.nodeId) };
+        } catch { return { kind: e.controller.kind, command: null }; }
+      })() } : {}),
     });
 
     const herdrSocketPath = resolveHerdrSocketPath();
@@ -2236,15 +2302,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // per pid (default-home-first + bounded PID cache).
       const { ProcessCensus } = await import("./domain/process-census.js");
       const { CodexThreadIdResolver } = await import("./domain/codex-thread-id.js");
-      const divergenceCensus = new ProcessCensus();
+      const divergenceCensus = contextProcessCensus;
       const codexThreadIdResolver = new CodexThreadIdResolver({ defaultHome: nodeOs.homedir(), codexHome: configuredCodexHome });
       const currentGenDeps = {
         getPanePid: async (sessionTarget: string) => tmuxAdapter.getPanePid ? tmuxAdapter.getPanePid(sessionTarget) : null,
         listProcesses: () => divergenceCensus.list(),
         // S10 follow-on: identity REQUIRED on resolve(); the identity-less case routes EXPLICITLY
         // through the named ungated escape hatch — never a silent fallback (r1 owed item 3).
-        readThreadIdByPid: (pid: number, identity?: string) =>
-          identity === undefined ? codexThreadIdResolver.resolveUngatedLegacy(pid) : codexThreadIdResolver.resolve(pid, identity),
+        readThreadIdByPid: contextGenerationDeps.readThreadIdByPid,
       };
       const OVERSIGHT_SEAT = "watch-lead@oversight";
       const modelDivergenceMonitor = new ModelDivergenceMonitor({
@@ -2273,7 +2338,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           if (seat.runtime === "codex") {
             const live = await resolveLiveCodexThreadId(seat.sessionName, genDeps);
             if (!live.ok) return { ok: false as const, reason: live.reason };
-            const rollout = contextUsageStore.readCodexAndNormalize({ threadId: live.id, sessionName: seat.sessionName }).transcriptPath;
+            const codexHome = live.pid && live.startedAt ? await codexRootForProcess(live.pid, live.startedAt) : null;
+            if (!codexHome) return { ok: false as const, reason: "current Codex account home is unverified" };
+            const rollout = contextUsageStore.readCodexAndNormalize({ threadId: live.id, sessionName: seat.sessionName, codexHome }).transcriptPath;
             if (!rollout) return { ok: false as const, reason: `live thread ${live.id.slice(0, 8)}… has no readable rollout` };
             const model = readCodexEffectiveModel(rollout);
             return model ? { ok: true as const, model } : { ok: false as const, reason: `no model signal in the bounded read of ${rollout}` };
@@ -2406,6 +2473,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // so a stage minted by a retired generation is refused for the successor. null = UNKNOWN → the
         // gate is inert (never compares a stale generation as if live).
         {
+          db,
+          restoreSkillPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md"),
           resolveOccupantGeneration: (sessionName) =>
             sessionRegistry.currentOccupantGenerationForSession(sessionName),
           onPostRestoreComplete: (receipt) => {
@@ -2434,7 +2503,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       undefined,
       legacyProviderUsageDirectory(OPENRIG_HOME),
     ),
-  ));
+  ), resolveCodexRuntime);
+  const { ControllerService } = await import("./domain/controller-service.js");
+  deps.controllerService = new ControllerService(rigRepo);
   deps.contextMonitor = contextMonitor;
   // OPR.0.4.3.14 — expose the SAME enforcer instance to routes for the manual
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
@@ -2501,12 +2572,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // no drivers) — `rig slack status` names what is missing.
   const { GatewaySubsystem } = await import("./domain/gateway/gateway-subsystem.js");
   const { buildSlackGatewayWire, makeHumanReplyResolver } = await import("./domain/gateway/slack/slack-subsystem.js");
+  const { HumanDecisionService } = await import("./domain/human-decision-service.js");
+  const { buildHumanBridgeDelivery } = await import("./domain/gateway/human-bridge-delivery.js");
+  const humanBridgeDelivery = buildHumanBridgeDelivery(OPENRIG_HOME, queueRepoInstance);
+  const humanDecisions = new HumanDecisionService(db, queueRepoInstance,
+    makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract));
+  deps.humanDecisionService = humanDecisions;
+  await humanDecisions.recover();
   const gatewaySubsystem = new GatewaySubsystem({
     home: OPENRIG_HOME,
     wire: () => buildSlackGatewayWire({
       home: OPENRIG_HOME,
+      alternateDelivery: humanBridgeDelivery,
       queueRepo: queueRepoInstance,
       resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract),
+      answerHumanDecision: input => humanDecisions.answer(input.qitemId,
+        { session: input.actorSession, scope: "slack" },
+        { requestId: input.requestId, decision: input.decision,
+          answers: input.questionId && input.optionId ? { [input.questionId]: input.optionId } : undefined }),
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),
@@ -2520,6 +2603,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.webUiEnabled = opts?.webUiEnabled ?? new ContextPackSettingsStore().resolveOne("ui.enabled").value === true;
   // /api browser boundary: this machine's exact Tailscale MagicDNS name, looked up on demand.
   deps.selfNameDiscovery = () => discoverTailscaleSelfNames({ timeoutMs: 1500 });
+  const providerAccountManager = new ProviderAccountManager(deps, seatAccountHomes);
+  (deps.providerService as ProviderServiceImpl).setAccountManager(providerAccountManager);
+  wireSessionRenewal(deps, providerAccountManager);
+  deps.providerAccountManager = providerAccountManager;
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
   return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket };

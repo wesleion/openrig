@@ -124,8 +124,35 @@ export function providerRoutes(): Hono {
       return c.json({ error: "forceUnsafe must be a boolean" }, 400);
     }
     // Business outcome (incl. failed_safely / rebind_in_progress) is an explicit 200 payload.
-    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe }), 200);
+    if (body.whenIdle !== undefined && typeof body.whenIdle !== "boolean") {
+      return c.json({ error: "whenIdle must be a boolean" }, 400);
+    }
+    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe,
+      ...(body.whenIdle === undefined ? {} : { whenIdle: body.whenIdle }) }), 200);
   });
 
+  router.get("/rotation", c => {
+    const svc = svcOf(c);
+    if (!svc?.rotation) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    return c.json(svc.rotation(c.req.query("rig")) as object);
+  });
+  router.post("/rotation", async c => {
+    const svc = svcOf(c);
+    if (!svc?.setRotation) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body.rig !== "string" || !body.rig.trim() || typeof body.enabled !== "boolean") {
+      return c.json({ error: "rig and boolean enabled are required" }, 400);
+    }
+    try { return c.json(svc.setRotation(body.rig, body.enabled) as object); }
+    catch (error) { return c.json({ error: (error as Error).message }, 400); }
+  });
+  router.post("/register", async c => {
+    const svc = svcOf(c);
+    if (!svc?.register) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body.account !== "string") return c.json({ error: "account is required" }, 400);
+    try { return c.json(svc.register(body.account) as object); }
+    catch (error) { return c.json({ error: (error as Error).message }, 400); }
+  });
   return router;
 }

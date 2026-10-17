@@ -135,6 +135,39 @@ describe("ContextMonitor", () => {
     }));
   }
 
+  it("passes live native thread/account/generation proof while retaining an old inference timestamp", async () => {
+    const { node, sessionName } = seedCodexNode();
+    writeCodexTokenCount("current-native-thread");
+    const nativeRoot = join(codexHomeDir, ".codex");
+    const path = join(nativeRoot, "sessions", "current-native-thread.jsonl");
+    const at = new Date(Date.now() - 86400000).toISOString();
+    writeFileSync(path, JSON.stringify({ timestamp: at, type: "event_msg", payload: { type: "token_count",
+      info: { last_token_usage: { input_tokens: 100 }, model_context_window: 1000 } } }));
+    const provedStore = new ContextUsageStore(db, { stateDir: tmpDir,
+      resolveOccupantBootAt: () => new Date().toISOString(), resolveOccupantGeneration: () => "current-uuid" });
+    const read = vi.spyOn(provedStore, "readCodexAndNormalize");
+    const resolve = vi.fn(async () => ({ threadId: "current-native-thread", codexHome: nativeRoot, generationUuid: "current-uuid" }));
+    monitor = new ContextMonitor(db, provedStore, undefined, undefined, undefined, undefined, undefined, resolve);
+    await monitor.pollOnce();
+    expect(resolve).toHaveBeenCalledWith(sessionName, node.id);
+    expect(read).toHaveBeenCalledWith({ threadId: "current-native-thread", sessionName,
+      codexHome: nativeRoot, verifiedGeneration: "current-uuid" });
+    const usage = provedStore.getForNode(node.id, sessionName);
+    expect(usage.availability).toBe("known");
+    expect(usage.usedPercentage).toBe(10);
+    expect(usage.sampledAt).toBe(at);
+    expect(usage.fresh).toBe(false);
+  });
+
+  it("does not fall back to a stored resume token when the live native join is unavailable", async () => {
+    const { node, sessionName, threadId } = seedCodexNode();
+    writeCodexTokenCount(threadId);
+    monitor = new ContextMonitor(db, store, undefined, undefined, undefined, undefined, undefined, async () => null);
+    await monitor.pollOnce();
+    expect(store.getForNode(node.id, sessionName).availability).toBe("unknown");
+    expect(store.getForNode(node.id, sessionName).reason).toBe("no_data");
+  });
+
   const VALID_SIDECAR = {
     context_window: {
       context_window_size: 200000,
@@ -285,8 +318,10 @@ describe("ContextMonitor", () => {
     expect(usage.availability).toBe("known");
     expect(usage.source).toBe("codex_token_count_jsonl");
     expect(usage.usedPercentage).toBe(88);
-    expect(usage.totalInputTokens).toBe(227139);
-    expect(usage.totalOutputTokens).toBe(611);
+    expect(usage.totalInputTokens).toBeNull();
+    expect(usage.lastInference?.inputTokens).toBe(227139);
+    expect(usage.totalOutputTokens).toBeNull();
+    expect(usage.lastInference?.outputTokens).toBe(611);
     expect(ensureContextCollectorSpy).not.toHaveBeenCalled();
   });
 

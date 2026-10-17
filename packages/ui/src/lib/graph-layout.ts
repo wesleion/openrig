@@ -35,7 +35,7 @@ function isPodContainer(node: LayoutNode): boolean {
 }
 
 const NODE_WIDTH = 240;
-const NODE_HEIGHT = 160;
+const NODE_HEIGHT = 208;
 const MAX_POD_COLUMNS = 3;
 const POD_MEMBER_GAP_X = 36;
 const POD_MEMBER_GAP_Y = 32;

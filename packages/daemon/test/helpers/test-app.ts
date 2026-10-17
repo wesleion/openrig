@@ -4,6 +4,8 @@ import { queueTransitionsQitemIdOrderSchema } from "../../src/db/migrations/098_
 import { queueItemsRecoveryTagsSchema } from "../../src/db/migrations/099_queue_items_recovery_tags.js";
 import { resumeRotationSchema } from "../../src/db/migrations/101_claude_resume_rotation.js";
 import { rigNonInterruptiveSchema } from "../../src/db/migrations/095_rig_non_interruptive.js";
+import { sessionRenewalSchema } from "../../src/db/migrations/098_session_renewal.js";
+import { controllerTelemetryCompactionSchema } from "../../src/db/migrations/097_controller_telemetry_compaction.js";
 import { mockShellCommand } from "./shell-command-mock.js";
 import { vi } from "vitest";
 import type Database from "better-sqlite3";
@@ -141,7 +143,10 @@ export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, even
  * (e.g. a new shared read). If one does, the migration must MOVE INTO migrationsForFullTestDb (delete
  * its exclusion); the guard's redundant-exclusion check then keeps the two in sync.
  */
+migrationsForFullTestDb.push(controllerTelemetryCompactionSchema, sessionRenewalSchema);
+
 export const migrationsForFullTestDbExclusions: Record<string, string> = {
+  "096_human_bridge.sql": "Scoped human bridge events, decisions and receipts require the full modern queue schema; native bridge suites migrate ALL_MIGRATIONS. This fixture is the legacy core edge and never configures a bridge.",
   "082_archive_identity_provenance.sql": "archive extension; 054 is excluded from this core fixture. Archive identity regressions use ALL_MIGRATIONS.",
   "026_inbox_entries.sql": "inbox subsystem table — not on the shared core edge (inbox suites migrate it inline).",
   "027_outbox_entries.sql": "outbox subsystem table — not on the shared core edge (outbox suites migrate it inline).",

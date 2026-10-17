@@ -20,6 +20,12 @@ interface RFNodeData {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  effort?: string | null;
+  nodeId?: string;
+  controller?: import("./types.js").ControllerStatus | null;
+  contextUsage?: import("./types.js").ContextUsage;
+  runtimeMetadata?: import("./types.js").ContextUsage["runtimeMetadata"];
+  activityState?: import("./types.js").NodeInventoryEntry["activityState"];
   status: string | null;
   binding: Binding | null;
   nodeKind: "agent" | "infrastructure";
@@ -76,6 +82,9 @@ const VERTICAL_SPACING = 200;
 
 export interface InventoryOverlay {
   logicalId: string;
+  controller?: import("./types.js").ControllerStatus | null;
+  contextUsage?: import("./types.js").ContextUsage;
+  activityState?: import("./types.js").NodeInventoryEntry["activityState"];
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   canonicalSessionName: string | null;
   restoreOutcome: string;
@@ -150,6 +159,11 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         role: node.role,
         runtime: node.runtime,
         model: node.model,
+        nodeId: node.id,
+        controller: overlay?.controller ?? (node.controller ? { ...node.controller, available: false } : null),
+        contextUsage: overlay?.contextUsage,
+        runtimeMetadata: overlay?.contextUsage?.runtimeMetadata,
+        activityState: overlay?.activityState,
         effort: node.effort ?? null,
         status: latestSession ? latestSession.status : null,
         binding: node.binding,

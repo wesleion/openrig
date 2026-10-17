@@ -40,6 +40,11 @@ describe("FR-6 restore-plan token state", () => {
     expect(result).toMatchObject({ hasHistory: false, intendedAction: "fresh-primed" });
     expect(result.reason).toBeUndefined();
   });
+  it("forecasts a tokenless terminal occupant as a fresh shell, like restore does (dev.jev)", () => {
+    const rows = [row("n1", { resumeType: null, resumeToken: null })];
+    expect(buildRestorePlanPreview(rigWith([{ id: "n1", logicalId: "jev", runtime: "terminal" }]), null, rows).nodes[0]!.intendedAction).toBe("fresh-primed");
+    expect(buildRestorePlanPreview(rigWith([{ id: "n1", logicalId: "a", runtime: "codex" }]), null, rows).nodes[0]!.intendedAction).toBe("awaiting-decision");
+  });
   it("honors explicit snapshot occupant state over the legacy relation", () => {
     const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "claude-code" }]);
     const rows = [row("n1")];

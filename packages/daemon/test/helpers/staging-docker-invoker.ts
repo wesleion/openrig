@@ -25,7 +25,7 @@
 // real-engine proof (docker vs Apple container, whose exec-stdin semantics are untested for this
 // pipe) explicitly waits on the 5.3 engine-substrate ruling.
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { StagingDocker } from "./scenario-container-stage.js";
 
 export interface RealStagingDockerOptions {
@@ -39,6 +39,15 @@ export interface RealStagingDockerOptions {
 }
 
 const DEFAULT_STEP_TIMEOUT_MS = 120_000;
+
+/** Shell descendants can retain stdout after the shell exits. Own a process group
+ * on POSIX so a timeout closes the entire fixture pipeline. */
+function killOwnedProcess(child: ChildProcess): void {
+  if (process.platform !== "win32" && child.pid !== undefined) {
+    try { process.kill(-child.pid, "SIGKILL"); return; } catch { /* already exited */ }
+  }
+  child.kill("SIGKILL");
+}
 
 interface ProcExit {
   code: number;
@@ -67,16 +76,17 @@ export function makeRealStagingDocker(opts: RealStagingDockerOptions = {}): Stag
       // reads stdin sees EOF immediately — the exact hole the inline invoker left open.
       const consumer = spawn(command, args, {
         stdio: [stdinFrom ? "pipe" : "ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
       });
-      kills.push(() => consumer.kill("SIGKILL"));
+      kills.push(() => killOwnedProcess(consumer));
 
       let producerDone: Promise<ProcExit> | null = null;
       let producerClosed = false;
       let producerKilledEarly = false;
       let killProducer: (() => void) | null = null;
       if (stdinFrom) {
-        const producer = spawn(tarCommand, stdinFrom, { stdio: ["ignore", "pipe", "pipe"] });
-        killProducer = () => producer.kill("SIGKILL");
+        const producer = spawn(tarCommand, stdinFrom, { stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+        killProducer = () => killOwnedProcess(producer);
         kills.push(killProducer);
         // EPIPE on the wiring (consumer exited early) must not crash the invoker — the producer's
         // own SIGPIPE death is the loud signal, reported through the dual-exit check below.

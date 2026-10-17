@@ -318,11 +318,11 @@ describe("R2 HIGH-3 — keyboard content focus stays VISIBLE under truecolor (se
   });
 });
 
-describe("MR8 — width-clip honesty indicator (founder GO; indicator ONLY)", () => {
-  it("a graph wider than the viewport renders the visible clipped-content indicator at the right edge", async () => {
+describe("width-clip honesty when the viewport cannot fit the minimum card", () => {
+  it("an extremely narrow viewport retains the visible clipped-content indicator", async () => {
     const { renderGraphStyle } = await import("../src/topology/render-graph.js");
-    // 40 cols cannot hold the fixture's three ranked columns
-    const plain = renderGraphStyle("hatchet", spikeFixtureGraph(), { host: "h", rig: "r", selected: null }, 40).plainLines().join("\n");
+    // Pod wrapping handles normal widths; 20 columns cannot hold a minimum card plus containment.
+    const plain = renderGraphStyle("hatchet", spikeFixtureGraph(), { host: "h", rig: "r", selected: null }, 20).plainLines().join("\n");
     expect(plain).toMatch(/content clipped ▸/);
   });
 

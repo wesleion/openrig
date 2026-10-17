@@ -155,6 +155,7 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
               ? m["agent_ref"]
               : undefined,
         profile: typeof m["profile"] === "string" ? m["profile"] : undefined,
+        ...("controller" in m ? { controller: m["controller"] } : {}),
         codexConfigProfile:
           typeof m["codexConfigProfile"] === "string"
             ? m["codexConfigProfile"]
@@ -395,8 +396,13 @@ rigsRoutes.get("/:id/graph", async (c) => {
   const pods = getRepo(c).db
     .prepare("SELECT id, rig_id, namespace, label, summary, continuity_policy_json, created_at FROM pods WHERE rig_id = ? ORDER BY created_at")
     .all(rigId) as Array<{ id: string; rig_id: string; namespace: string; label: string; summary: string | null; continuity_policy_json: string | null; created_at: string }>;
-  const overlay: InventoryOverlay[] = inventoryWithActivity.map((n) => ({
+  const controllerService = c.get("controllerService" as never) as import("../domain/controller-service.js").ControllerService | undefined;
+  const enrichedInventory = controllerService ? await controllerService.enrich(inventoryWithActivity) : inventoryWithActivity;
+  const overlay: InventoryOverlay[] = enrichedInventory.map((n) => ({
     logicalId: n.logicalId,
+    controller: n.controller,
+    contextUsage: n.contextUsage,
+    activityState: n.activityState,
     startupStatus: n.startupStatus,
     canonicalSessionName: n.canonicalSessionName,
     restoreOutcome: n.restoreOutcome,

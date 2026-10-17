@@ -33,6 +33,7 @@ import type { ColorMode, Token } from "./theme.js";
 import { terminalLines } from "./terminals/terminal-model.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W, wrapDetailLines } from "./detail.js";
 import { healthAgentLines, healthDetailLines, healthListLines, healthSummaryLine } from "./health/health-model.js";
+import { hasRuntimeClock, runtimeMetricFields, stateWithElapsed } from "./runtime-metrics.js";
 import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, ViewState } from "./types.js";
 
 interface ContentLine {
@@ -231,9 +232,40 @@ function agentDetailLines(
   found: NonNullable<ReturnType<typeof findAgent>>,
   contentWidth: number,
   timeZone = DEFAULT_TIME_ZONE,
+  nowMs = 0,
 ): ContentLine[] {
   const { agent, rig, pod } = found;
   const session = agent.session;
+  if (agent.nodeKind === "infrastructure" && agent.controller) {
+    const controller = agent.controller;
+    const local = found.host === snap.hosts[0];
+    const modes = [["off", "Desligado"], ["observe", "Observar"], ["apply", "Aplicar"]] as const;
+    return detailPage({ text: `tool ${agent.name} · ${controller.mode ?? "unknown"}` }, [
+      { title: "CONTROLLER", fields: [
+        { label: "mode", value: controller.mode ?? "—" },
+        { label: "available", value: controller.available === false ? `no · ${controller.error ?? "unavailable"}` : controller.available === true ? "yes" : "unknown" },
+        { label: "model apply", value: controller.modelApplyEnabled ? "promoted" : "pending benchmark; model decisions remain observational" },
+        { label: "config", value: controller.config },
+        ...(controller.changedAt ? [{ label: "changed", value: displayTime(controller.changedAt, timeZone) }] : []),
+      ], lines: local && agent.nodeId && (agent.rigId || rig.id) && controller.available === true
+        ? modes.map(([mode, label]) => listItem(`${label}${controller.mode === mode ? " · current" : ""}`, {
+          type: "act", act: "controller-mode", rigId: agent.rigId ?? rig.id!, nodeId: agent.nodeId!, mode,
+          ...(controller.revision !== undefined ? { expectedRevision: controller.revision } : {}),
+        }))
+        : [fieldLine({ label: "controls", value: local ? "unavailable until registration is verified" : "remote view is read only" })],
+      },
+      ...(controller.latest ? [{ title: "LAST CHECKPOINT", fields: [
+        { label: "state", value: controller.latest.status },
+        { label: "action", value: controller.latest.action ?? "—" },
+        { label: "reason", value: controller.latest.reason ?? "—" },
+      ] }] : []),
+      { title: "RUNTIME", fields: runtimeMetricFields(agent, nowMs, timeZone).filter(field => ["model", "effort", "runtime src"].includes(field.label)) },
+      { title: "LOCATION", fields: [
+        { label: "host", value: found.host.name }, { label: "rig", value: rig.name },
+        { label: "pod", value: pod.name }, { label: "cwd", value: agent.cwd ?? "—" },
+      ] },
+    ]);
+  }
   const specInLibrary = !!agent.spec && !!findSpec(snap, agent.spec, "agent");
   const currentRows = session ? rowsForAgent(snap, session, [snap.attention, snap.blocked, snap.inProgress]) : [];
   const pendingRows = session ? rowsForAgent(snap, session, [snap.pending]) : [];
@@ -274,7 +306,8 @@ function agentDetailLines(
         title: `CONTEXT · ${context == null ? "unknown" : `${context}%`}`,
         lines: [
           fieldLine({ label: "meter", value: context == null ? "— (not yet known)" : `${context}% used  ${barCells(context / 100, meterWidth)}` }),
-          fieldLine({ label: "tokens", value: `${number(agent.totalInputTokens)} input · ${number(agent.totalOutputTokens)} output · ${number(agent.contextWindowSize)} window` }),
+          fieldLine({ label: "tokens", value: `${agent.totalInputTokens?.toLocaleString("en-US") ?? "—"} input · ${agent.totalOutputTokens?.toLocaleString("en-US") ?? "—"} output · ${agent.contextWindowSize?.toLocaleString("en-US") ?? "—"} window` }),
+          fieldLine({ label: "cwd", value: agent.cwd ?? "— (not served)" }),
           runtimeLine,
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
           fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${pod.name}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } }),
@@ -334,6 +367,7 @@ function agentDetailLines(
           ...wrapDetailValue("basis", "Served seat binding; the authored library may have changed since launch.", contentWidth),
         ],
       },
+      { title: "RUNTIME METRICS", fields: runtimeMetricFields(agent, nowMs, timeZone) },
     ]),
   ];
 }
@@ -565,6 +599,8 @@ interface MotionCtx {
   reduced: boolean;
   used: boolean;
   loading: boolean;
+  nowMs: number;
+  runtimeClockUsed: boolean;
 }
 
 function instanceContentLines(
@@ -574,7 +610,7 @@ function instanceContentLines(
   contentWidth: number,
   motion: MotionCtx,
 ): ContentLine[] {
-  const lines = tabsLine(state, `instance ${host.name}`);
+  const lines = tabsLine(state, `instance ${host.displayName || host.name}`);
   const scope = { kind: "instance", local: host === snap.hosts[0] } as const;
   if (state.viewTab === "health") return [...lines, { text: "" }, ...healthListLines(snap, scope, contentWidth)];
   if (state.viewTab === "recent") {
@@ -586,20 +622,20 @@ function instanceContentLines(
   if (state.viewTab === "overview") {
     return [
       ...lines,
-      ...detailPage({ text: `instance ${host.name}` }, [
+      ...detailPage({ text: `instance ${host.displayName || host.name}` }, [
         {
           title: "instance",
           fields: [
             { label: "identity", value: host.name },
             { label: "transport", value: host.id ?? "local" },
-            { label: "shape", value: host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · seat inventory incomplete` : `${host.rigs.length} rigs · ${host.rigs.reduce((n, rig) => n + rig.pods.reduce((m, pod) => m + pod.agents.length, 0), 0)} seats` },
+            { label: "shape", value: host.rigs.some(r => r.inventoryUnavailable) ? `${host.rigs.length} rigs · seat inventory incomplete` : `${host.rigs.length} rigs · ${host.rigs.reduce((n, rig) => n + rig.pods.reduce((m, pod) => m + pod.agents.filter(a => a.nodeKind !== "infrastructure").length, 0), 0)} seats` },
           ],
         },
         {
           title: "rigs",
           lines: host.rigs.length > 0
             ? host.rigs.map((rig) => listItem(
-                alignedRow([[rig.name, 20], [rig.lifecycleState ?? "unknown", 20], [rig.inventoryUnavailable ? "inventory unavailable" : `${rig.pods.length} pods · ${rig.pods.reduce((n, pod) => n + pod.agents.length, 0)} seats`, 24]]),
+                alignedRow([[rig.name, 20], [rig.lifecycleState ?? "unknown", 20], [rig.inventoryUnavailable ? "inventory unavailable" : `${rig.pods.length} pods · ${rig.pods.reduce((n, pod) => n + pod.agents.filter(a => a.nodeKind !== "infrastructure").length, 0)} seats`, 24]]),
                 { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } },
               ))
             : [{ text: "  (no local rigs served — proven empty)" }],
@@ -663,10 +699,13 @@ function instanceContentLines(
       previousPod = pod;
       const stateCell = operationalState(agent.status, motion);
       const queue = queueFacts(snap, agent.session);
-      seatCount += 1;
-      if (["active", "working", "running"].includes(agent.status)) workingCount += 1;
-      if (/attention|needs|blocked|unknown|failed/.test(agent.status)) attentionCount += 1;
-      openCount += queue.count;
+      if (agent.nodeKind !== "infrastructure") {
+        seatCount += 1;
+        if (["active", "working", "running"].includes(agent.status)) workingCount += 1;
+        if (/attention|needs|blocked|unknown|failed/.test(agent.status)) attentionCount += 1;
+        openCount += queue.count;
+      }
+      motion.runtimeClockUsed ||= hasRuntimeClock(agent, motion.nowMs);
       lines.push({
         text: tableRow(columns, {
           rig: rig.name,
@@ -674,7 +713,7 @@ function instanceContentLines(
           seat: `${stateCell.mark} ${seatName(pod, agent.name)}`,
           runtime: runtimeShort(agent.runtime),
           context: contextCompact(agent.context, contentWidth < 110),
-          status: stateCell.word,
+          status: stateWithElapsed(agent, stateCell.word, motion.nowMs, columns.find(([key]) => key === "status")?.[2] ?? 9),
           queue: queue.count || "·",
           work: queue.work,
           now: queue.now,
@@ -733,13 +772,14 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       const podName = state.drill.find((part) => part.kind === "pod")?.name;
       const found = hostName ? findAgent(snap, leaf.name, { host: hostName, rig: rigName, pod: podName }) : findAgent(snap, leaf.name);
       if (!found) return [{ text: `agent "${leaf.name}" not in the current snapshot` }];
-      return agentDetailLines(snap, found, contentWidth, state.timeZone);
+      motion.runtimeClockUsed ||= hasRuntimeClock(found.agent, motion.nowMs);
+      return agentDetailLines(snap, found, contentWidth, state.timeZone, motion.nowMs);
     }
     const hostName = state.drill.find((d) => d.kind === "host")?.name;
     const host = (hostName ? snap.hosts.find((candidate) => candidate.name === hostName) : snap.hosts[0]);
     if (leaf?.kind === "host" && host) return instanceContentLines(state, snap, host, contentWidth, motion);
     if (!leaf && host?.rigs.length) return wrapDetailLines([
-      { text: `TOPOLOGY · ${host.name}` }, { text: "Choose a rig to read its seats and work." },
+                { text: `TOPOLOGY · ${host.displayName || host.name}` }, { text: "Choose a rig to read its seats and work." },
       { text: `${host.rigs.length} rig${host.rigs.length === 1 ? "" : "s"} · select one in Explorer` },
       { text: "Bright ▦ live agents · gray ▦ none · ? unknown" },
     ], contentWidth);
@@ -835,7 +875,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
             title: "rig",
             fields: [
               { label: "host", value: host.name },
-              { label: "shape", value: `${rig.pods.length} pods · ${all.length} agents` },
+              { label: "shape", value: `${rig.pods.length} pods · ${all.filter(a => a.nodeKind !== "infrastructure").length} agents${all.some(a => a.nodeKind === "infrastructure") ? ` · ${all.filter(a => a.nodeKind === "infrastructure").length} tools` : ""}` },
               ...(rig.lifecycleState ? [{ label: "state", value: rig.lifecycleState }] : []),
             ],
           },
@@ -843,7 +883,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
             title: "pods",
             lines: rig.pods.map((pod) =>
               listItem(
-                alignedRow([[pod.name, 14], [`${pod.agents.length} agents`, 10], [pod.agents.map((a) => a.status).filter((s, i, arr) => arr.indexOf(s) === i).join(" · "), 40]]),
+                alignedRow([[pod.name, 14], [`${pod.agents.filter(a => a.nodeKind !== "infrastructure").length} agents`, 10], [pod.agents.map((a) => a.status).filter((s, i, arr) => arr.indexOf(s) === i).join(" · "), 40]]),
                 { type: "drill", resource: "pod", name: pod.name, target: { host: host.name, rig: rig.name } },
               ),
             ),
@@ -887,6 +927,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
           action: { type: "act", act: "run", rigId: rig.id ?? rig.name, agent: a.name },
         });
       const stateCell = operationalState(a.status, motion);
+      motion.runtimeClockUsed ||= hasRuntimeClock(a, motion.nowMs);
       const queue = queueFacts(snap, a.session);
       lines.push({
         // the WHOLE row is the hit surface (not a testid'd control): clicking
@@ -897,7 +938,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
           runtime: runtimeShort(a.runtime),
           model: tableModel(a.model),
           context: contextCompact(a.context, narrowFactory),
-          status: stateCell.word,
+          status: stateWithElapsed(a, stateCell.word, motion.nowMs, agentCols.find(([key]) => key === "status")?.[2] ?? 9),
           queue: queue.count || "·",
           work: queue.work,
           now: queue.now,
@@ -908,9 +949,10 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       });
     }
     lines.push({ text: "" });
-    const working = rows.filter((agent) => ["active", "working", "running"].includes(agent.status)).length;
-    const attention = rows.filter((agent) => /attention|needs|blocked|unknown|failed/.test(agent.status)).length;
-    lines.push({ text: `${rows.length} seats · ${working} working · ${attention} need attention · ${rows.reduce((n, agent) => n + queueFacts(snap, agent.session).count, 0)} open rows` });
+    const agentRows = rows.filter(agent => agent.nodeKind !== "infrastructure");
+    const working = agentRows.filter((agent) => ["active", "working", "running"].includes(agent.status)).length;
+    const attention = agentRows.filter((agent) => /attention|needs|blocked|unknown|failed/.test(agent.status)).length;
+    lines.push({ text: `${agentRows.length} seats${rows.length !== agentRows.length ? ` · ${rows.length - agentRows.length} tools` : ""} · ${working} working · ${attention} need attention · ${agentRows.reduce((n, agent) => n + queueFacts(snap, agent.session).count, 0)} open rows` });
     if (!podFilter) lines.push(...recentLines(snap, { kind: "rig", rig: rig.name }, contentWidth, false, state.timeZone));
     return lines;
   }
@@ -1691,6 +1733,8 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
     reduced,
     used: false,
     loading: load.inFlight || !load.settled,
+    nowMs,
+    runtimeClockUsed: false,
   };
   const lines: string[] = [];
   const hitMap: Screen["hitMap"] = [];
@@ -1846,5 +1890,6 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
     // an un-expired ack (even the static reduced-motion glyph) schedules the
     // bounded expiry redraw — the acknowledgement must settle cleanly
     motionActive: motion.used || flashRows.length > 0 || flashAck,
+    runtimeClockActive: motion.runtimeClockUsed,
   };
 }

@@ -75,7 +75,7 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // in the pure leaf module active-occupant.ts, shared with preview, snapshot
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
-import { resolveActiveSnapshotSession, activeOccupantAmbiguityError } from "./active-occupant.js";
+import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, occupantRestorePolicy } from "./active-occupant.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
@@ -873,7 +873,7 @@ export class RestoreOrchestrator {
       // this function (before the continuity consult); ambiguity already
       // returned there, so only resolved/none reach here.
       const snapSession = occupantResolution.kind === "resolved" ? occupantResolution.session : null;
-      const policy = snapSession?.restorePolicy ?? "resume_if_possible";
+      const policy = occupantRestorePolicy(node.runtime, snapSession?.restorePolicy);
       const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
       if (policy === "resume_if_possible" && snapSession && !snapSession.resumeToken && !freshRequested) {
@@ -1076,7 +1076,7 @@ export class RestoreOrchestrator {
 
     // Check restore policy. OPR.0.3.4.2: a --fresh-listed seat (operation B)
     // deliberately skips the resume attempt; its launch reports `fresh-primed`.
-    const restorePolicy = session?.restorePolicy ?? "resume_if_possible";
+    const restorePolicy = occupantRestorePolicy(node.runtime, session?.restorePolicy);
     const resumeType = session?.resumeType ?? null;
     const resumeToken = session?.resumeToken ?? null;
     const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;

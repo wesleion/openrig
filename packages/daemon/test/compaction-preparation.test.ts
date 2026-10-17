@@ -2,7 +2,7 @@ import {afterEach, expect, it, vi} from 'vitest';
 import {Hono} from 'hono';
 import {execFileSync} from 'node:child_process';
 import {compactionRoutes} from '../src/routes/compaction.js';
-import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync, existsSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
@@ -10,17 +10,25 @@ import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
 import {ContextMonitor} from '../src/domain/context-monitor.js';
+import {claudeCompactionPane} from './helpers/managed-compaction-pane.js';
+import {createDb} from '../src/db/connection.js';
+import {migrate} from '../src/db/migrate.js';
+import {ALL_MIGRATIONS} from '../src/db/all-migrations.js';
+import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 const seat='writer@demo', input={sessionName:seat,runtime:'claude-code',usedPercentage:90};
+const canonicalSkill=fileURLToPath(new URL('../assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md',import.meta.url));
 const homes:string[]=[];
-afterEach(()=>{vi.restoreAllMocks();for(const h of homes.splice(0))rmSync(h,{recursive:true,force:true});});
-function fixture(manualPrepWaitMs=1000){
+const databases:ReturnType<typeof createDb>[]=[];
+afterEach(()=>{vi.restoreAllMocks();for(const db of databases.splice(0))db.close();for(const h of homes.splice(0))rmSync(h,{recursive:true,force:true});});
+function fixture(manualPrepWaitMs=1000,persistent=false){
  const home=mkdtempSync(join(tmpdir(),'compaction-preparation-'));homes.push(home);
- let clock=10000,generation='generation-one',activity='idle';
+ let clock=10000,generation='generation-one',activity='idle',staged='';
  let onSleep:(()=>Promise<void>)|undefined;
  const db={prepare:()=>({get:()=>undefined,all:()=>[]})} as any;
  const writes:string[]=[],keys:string[][]=[];
  const policy={enabled:true,thresholdPercent:80,preCompactInstruction:'Write a restore map.',compactInstruction:'',messageInline:'',messageFilePath:'',postRestoreAuditInstruction:''};
- const tmux={probeSession:vi.fn(async()=>({state:'present'})),sendText:vi.fn(async(_:string,text:string)=>{writes.push(text);return{ok:true};}),sendKeys:vi.fn(async(_:string,k:string[])=>{keys.push(k);return{ok:true};})};
+ const tmux={probeSession:vi.fn(async()=>({state:'present'})),capturePaneContent:vi.fn(async()=>claudeCompactionPane(activity,staged)),sendText:vi.fn(async(_:string,text:string,beforeInput?:()=>void|Promise<void>)=>{await beforeInput?.();staged=text;writes.push(text);return{ok:true};}),sendKeys:vi.fn(async(_:string,k:string[],beforeInput?:()=>void|Promise<void>)=>{await beforeInput?.();keys.push(k);staged='';return{ok:true};})};
  const guard=new SeatDeliveryGuard(db,()=>({nodeId:'node-one',session:seat,pane:'%1',occupant:generation}));
  Object.assign(tmux,{deliveryGuard:guard});
  const transport=new SessionTransport({db,rigRepo:{} as any,sessionRegistry:{} as any,tmuxAdapter:tmux as any,sleep:async(ms)=>{clock+=ms;},now:()=>new Date(clock),waitForIdlePollMs:5});
@@ -29,29 +37,106 @@ function fixture(manualPrepWaitMs=1000){
  (transport as any).classifySendReadiness=async()=>({state:activity,reason:'fixture',evidenceSource:'fixture'});
  (transport as any).diagnoseProducerLink=async()=> 'fixture';
  const settings={resolveClaudeCompactionPolicy:()=>policy};
- const e=new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,manualPrepWaitMs,now:()=>clock,sleep:async(ms)=>{clock+=ms;await onSleep?.();},resolveOccupantGeneration:()=>generation});
- return{e,transport,tmux,guard,settings,onSleep:(fn:()=>Promise<void>)=>{onSleep=fn;},writes,keys,policy,home,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;},activity:(s:string)=>{activity=s;}};
+ const durableDb=persistent?createDb():undefined;if(durableDb){databases.push(durableDb);migrate(durableDb,ALL_MIGRATIONS);}
+ const restart=()=>new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,manualPrepWaitMs,now:()=>clock,sleep:async(ms)=>{clock+=ms;await onSleep?.();},resolveOccupantGeneration:()=>generation,db:durableDb,restoreSkillPath:canonicalSkill});
+ const e=restart();
+ return{e,restart,durableDb,transport,tmux,guard,settings,onSleep:(fn:()=>Promise<void>)=>{onSleep=fn;},writes,keys,policy,home,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;},activity:(s:string)=>{activity=s;}};
 }
-function stageMap(f:ReturnType<typeof fixture>,suffix=''){
+function publish(f:ReturnType<typeof fixture>,suffix=''){
  const a=f.e.getPreparationState(seat)!;mkdirSync(dirname(a.mapPath),{recursive:true});
- writeFileSync(a.mapPath+'.tmp',`# Restore map\nCurrent work and next step.\n${a.marker}${suffix}\n`);
+ writeFileSync(a.mapPath+'.tmp',`# Restore map\nCurrent work and next step.\n${a.marker}${suffix}\n`);renameSync(a.mapPath+'.tmp',a.mapPath);
 }
 const compacts=(f:ReturnType<typeof fixture>)=>f.writes.filter(t=>t.startsWith('/compact'));
+for(const projection of ['missing','unowned','modified','owned','symlink'])it(`prep and restore read ${projection==='owned'?'native':'shipped'} instructions for ${projection} native skill`,async()=>{
+ const f=fixture(),cwd=join(f.home,'workspace');mkdirSync(cwd);
+ const relative=join('.claude','skills','claude-compaction-restore','SKILL.md'),native=join(cwd,relative);
+ const source=readFileSync(canonicalSkill,'utf8');
+ if(projection!=='missing'){
+  mkdirSync(dirname(native),{recursive:true});writeFileSync(native,projection==='modified'?'User-modified native skill.':source);
+  if(['modified','owned','symlink'].includes(projection)){
+   const owner=join(cwd,'.openrig','hooks','compaction-assets.json');mkdirSync(dirname(owner),{recursive:true});
+   writeFileSync(owner,JSON.stringify({version:1,files:{[relative]:{sha256:createHash('sha256').update(source).digest('hex')}}}));
+  }
+  if(projection==='symlink'){
+   const outside=join(f.home,'private-skill.md');writeFileSync(outside,source);rmSync(native);symlinkSync(outside,native);
+  }
+ }
+ f.policy.preCompactInstruction='Keep my custom pre-compaction checklist.';f.policy.messageInline='Keep my custom post-compaction checklist.';
+ const scoped={...input,cwd};await f.e.maybeAutoCompact(scoped);publish(f);await f.e.maybeAutoCompact(scoped);
+ await f.e.maybeAutoCompact({...scoped,usedPercentage:20});await f.e.maybeAutoCompact({...scoped,usedPercentage:20});
+ const expected=JSON.stringify(projection==='owned'?native:canonicalSkill);
+ expect(f.writes[0]).toContain(`Read the canonical restore skill directly from ${expected}`);
+ expect(f.writes[0]).toContain('Keep my custom pre-compaction checklist.');
+ const restore=f.writes.find(text=>text.startsWith('Please respond to this normal user message'))!;
+ expect(restore).toContain(`Read the canonical restore skill directly from ${expected}`);
+ expect(restore).toContain('Keep my custom post-compaction checklist.');
+ if(projection==='modified')expect(readFileSync(native,'utf8')).toBe('User-modified native skill.');
+ if(projection==='symlink')expect(lstatSync(native).isSymbolicLink()).toBe(true);
+});
+for(const state of ['running','needs_input','unknown','plan'])it(`automatic preparation waits for fresh ${state} pane without creating an attempt`,async()=>{
+ const f=fixture();
+ if(state==='plan')f.tmux.capturePaneContent.mockResolvedValue(claudeCompactionPane('idle','',true));else f.activity(state);
+ for(let i=0;i<4;i++)expect(await f.e.maybeAutoCompact(input)).toMatchObject({triggered:false,reason:'managed_compaction_deferred'});
+ expect(f.e.getPreparationState(seat)).toBeNull();expect(f.writes).toEqual([]);expect(f.keys).toEqual([]);
+});
+it('ready map remains the same attempt while working, then compact submits once after idle',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);publish(f);const original=f.e.getPreparationState(seat)!;
+ f.activity('running');for(let i=0;i<4;i++)await f.e.maybeAutoCompact(input);
+ expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:original.attemptId,deadlineAt:original.deadlineAt,status:'waiting'});
+ expect(f.writes).toHaveLength(1);f.activity('idle');await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
+ expect(compacts(f)).toHaveLength(1);
+});
+it('fresh busy observation after outer readiness but before actual paste keeps the ready map',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);publish(f);const id=f.e.getPreparationState(seat)!.attemptId;
+ const original=f.tmux.sendText.getMockImplementation()!;
+ f.tmux.sendText.mockImplementationOnce(async(...args)=>{f.activity('running');return original(...args);});
+ await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
+ expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:id,status:'waiting',reason:'managed_compaction_deferred'});
+ f.activity('idle');await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
+});
+it('a human turn after compact paste prevents Enter and permanently disarms automatic replay',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);publish(f);const enters=f.keys.length;
+ const original=f.tmux.sendText.getMockImplementation()!;
+ f.tmux.sendText.mockImplementationOnce(async(...args)=>{const result=await original(...args);f.activity('running');return result;});
+ await f.e.maybeAutoCompact(input);expect(f.keys).toHaveLength(enters);
+ expect(f.e.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'uncertain',reason:'delivery_uncertain'});
+ f.activity('idle');for(let i=0;i<3;i++)await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
+});
+it('durable restart reuses delivered unexpired preparation for the same occupant',async()=>{
+ const f=fixture(1000,true);await f.e.maybeAutoCompact(input);publish(f);const before=f.e.getPreparationState(seat)!;
+ const resumed=f.restart();expect(resumed.getPreparationState(seat)).toMatchObject({attemptId:before.attemptId,deadlineAt:before.deadlineAt,status:'waiting'});
+ await resumed.maybeAutoCompact(input);expect(f.writes.filter(t=>!t.startsWith('/compact'))).toHaveLength(1);expect(compacts(f)).toHaveLength(1);
+ expect(resumed.getPreparationHistory(seat)[0]).toMatchObject({attemptId:before.attemptId,status:'compact-sent',inFlight:null});
+});
+for(const invalid of ['expiry','occupant'])it(`durable restart disarms preparation after ${invalid}`,async()=>{
+ const f=fixture(1000,true);await f.e.maybeAutoCompact(input);publish(f);
+ if(invalid==='expiry')f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);else f.generation('new-occupant');
+ const resumed=f.restart();expect(resumed.getPreparationState(seat)).toMatchObject({status:'stopped',reason:invalid==='expiry'?'preparation_incomplete':'stale_generation'});
+ await resumed.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
+ expect(resumed.getPreparationHistory(seat)[0].reason).toBe(invalid==='expiry'?'preparation_incomplete':'stale_generation');
+});
+for(const kind of ['prep','compact'])it(`durable restart with interrupted ${kind} write never resends`,async()=>{
+ const f=fixture(1000,true);await f.e.maybeAutoCompact(input);const saved=f.durableDb!.prepare('SELECT state_json FROM compaction_preparations').get() as {state_json:string};
+ const state=JSON.parse(saved.state_json);state.inFlight=kind;
+ f.durableDb!.prepare('UPDATE compaction_preparations SET state_json=?').run(JSON.stringify(state));
+ const resumed=f.restart();expect(resumed.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'uncertain',reason:'delivery_uncertain'});
+ for(let i=0;i<4;i++)await resumed.maybeAutoCompact(input);expect(f.writes).toHaveLength(1);expect(f.keys).toHaveLength(1);
+});
 it('polls wait after delivered prep, ordinary real transport still circulates, exact map releases once',async()=>{
  const f=fixture();expect(AUTO_PREP_WAIT_MS_DEFAULT).toBe(25*60_000);
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
  expect(f.e.getPreparationState(seat)).toMatchObject({status:'waiting',delivery:'delivered'});
  await f.transport.send(seat,'ordinary work');expect(f.writes).toContain('ordinary work');
- stageMap(f);await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
+ publish(f);await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
 });
-it('ignores old maps and incomplete or wrong-attempt final and temp files',async()=>{
+it('ignores old maps, wrong-attempt/occupant markers, partial final and staging writes',async()=>{
  const f=fixture();writeFileSync(join(f.home,'RESTORE-MAP-old.md'),'old');await f.e.maybeAutoCompact(input);
  const a=f.e.getPreparationState(seat)!;mkdirSync(dirname(a.mapPath),{recursive:true});
  for(const text of ['partial',a.marker.replace(a.attemptId,'wrong-attempt'),a.marker.replace(a.occupantGeneration!,'wrong-occupant')]){
-  writeFileSync(a.mapPath,text);writeFileSync(a.mapPath+'.tmp',text);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
+  writeFileSync(a.mapPath,text);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
  }
- writeFileSync(a.mapPath+'.tmp',`# map\n${a.marker}\n`);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
- expect(readFileSync(a.mapPath,'utf8')).toBe(`# map\n${a.marker}\n`);expect(existsSync(a.mapPath+'.tmp')).toBe(false);
+ writeFileSync(a.mapPath+'.tmp',`# map\n${a.marker}\n`);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
+ renameSync(a.mapPath+'.tmp',a.mapPath);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
 });
 for(const end of ['expiry','cancel','disable','replacement'])it(`${end} disarms; a late map cannot compact or start automatic prep again`,async()=>{
  const f=fixture();await f.e.maybeAutoCompact(input);
@@ -60,10 +145,9 @@ for(const end of ['expiry','cancel','disable','replacement'])it(`${end} disarms;
  if(end==='cancel')f.e.cancelPreparation(seat);
  if(end==='disable')f.policy.enabled=false;
  if(end==='replacement')f.generation('generation-two');
- f.e.reconcilePreparations();stageMap(f);f.policy.enabled=true;
+ f.e.reconcilePreparations();publish(f);f.policy.enabled=true;
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
  expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
- expect(existsSync(f.e.getPreparationState(seat)!.mapPath)).toBe(false);
 });
 it('deadline begins when prep delivery returns, not before its await',async()=>{
  const f=fixture();const original=f.tmux.sendKeys.getMockImplementation()!;f.tmux.sendKeys.mockImplementationOnce(async(...args)=>{f.advance(60000);return original(...args);});
@@ -72,11 +156,11 @@ it('deadline begins when prep delivery returns, not before its await',async()=>{
 it('late successful prep transport completion cannot revive cancellation',async()=>{
  const f=fixture();let release!:()=>void;f.tmux.sendText.mockImplementationOnce(async()=>{await new Promise<void>(r=>release=r);return{ok:true};});
  const pending=f.e.maybeAutoCompact(input);await vi.waitFor(()=>expect(release).toBeTypeOf('function'));
- f.e.cancelPreparation(seat);release();await pending;stageMap(f);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
+ f.e.cancelPreparation(seat);release();await pending;publish(f);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
 });
 it('unanswered manual preparation expires within its original budget and is not latent',async()=>{
  const f=fixture();const r=await f.e.triggerManualCompact(input,{operatorInitiated:true});expect(r).toMatchObject({triggered:false,reason:'preparation_incomplete'});expect(compacts(f)).toHaveLength(0);
- stageMap(f);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
+ publish(f);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
 });
 it('explicit retry has a fresh attempt; one-use skip bypasses map only',async()=>{
  const f=fixture();await f.e.triggerManualCompact(input,{operatorInitiated:true});const old=f.e.getPreparationState(seat)!.attemptId;
@@ -89,7 +173,7 @@ it('manual map wait holds no input lease: ordinary delivery completes before map
  const f=fixture();f.onSleep(async()=>{
   expect(f.guard.ownsLifecycle('node-one')).toBe(false);
   expect((await f.transport.send(seat,'ordinary during preparation')).ok).toBe(true);
-  stageMap(f);
+  publish(f);
  });
  expect((await f.e.triggerManualCompact(input,{operatorInitiated:true})).triggered).toBe(true);
  expect(f.writes.indexOf('ordinary during preparation')).toBeLessThan(f.writes.findIndex(t=>t.startsWith('/compact')));
@@ -102,7 +186,7 @@ it('definite prep preflight failures retry boundedly; transport uncertainty neve
  for(let i=0;i<4;i++)await g.e.maybeAutoCompact(input);expect(uncertain).toHaveBeenCalledTimes(1);expect(g.e.getPreparationState(seat)?.delivery).toBe('uncertain');
 });
 it('cancel between compact paste and Enter prevents execution and later replay',async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
+ const f=fixture();await f.e.maybeAutoCompact(input);publish(f);
  const original=f.tmux.sendText.getMockImplementation()!;f.tmux.sendText.mockImplementationOnce(async(...args)=>{const r=await original(...args);f.e.cancelPreparation(seat);return r;});
  const enters=f.keys.length;await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);expect(f.keys).toHaveLength(enters);expect(compacts(f)).toHaveLength(1);
 });
@@ -115,21 +199,22 @@ for(const mapBeforeRise of [true,false])it(`threshold dip retains the same attem
  const f=fixture();await f.e.maybeAutoCompact(input);const original=f.e.getPreparationState(seat)!;
  f.advance(1000);await f.e.maybeAutoCompact({...input,usedPercentage:20});
  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:original.attemptId,deadlineAt:original.deadlineAt,status:'waiting'});
- if(mapBeforeRise)stageMap(f);
+ if(mapBeforeRise)publish(f);
  await f.e.maybeAutoCompact(input);
- if(!mapBeforeRise){expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);stageMap(f);await f.e.maybeAutoCompact(input);}
+ if(!mapBeforeRise){expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);publish(f);await f.e.maybeAutoCompact(input);}
  await f.e.maybeAutoCompact(input);
  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:original.attemptId,deadlineAt:original.deadlineAt,status:'compact-sent'});
  expect(f.writes.filter(t=>!t.startsWith('/compact'))).toHaveLength(1);expect(compacts(f)).toHaveLength(1);
 });
 for(const boundary of ['writeFile','load-buffer','key-list'])it(`actual tmux adapter checks cancellation after ${boundary} await`,async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
- const commands:string[][]=[];let pasted=false,unlinked=false;
+ const f=fixture();await f.e.maybeAutoCompact(input);publish(f);
+ const commands:string[][]=[];let pasted=false,unlinked=false,payload='';
  const adapter=new TmuxAdapter(async()=>{throw new Error('unexpected shell execution');},{
-  writeFile:async()=>{if(boundary==='writeFile')f.e.cancelPreparation(seat);},
+  writeFile:async(_path,text)=>{payload=text;if(boundary==='writeFile')f.e.cancelPreparation(seat);},
   unlink:async()=>{unlinked=true;},tmpName:()=>'/tmp/injected-payload',bufferName:()=> 'injected-buffer',
  },async argv=>{
   commands.push(argv);
+  if(argv[1]==='capture-pane')return claudeCompactionPane('idle',pasted?payload:'');
   if(argv[1]==='list-panes'){
    if(pasted && boundary==='key-list')f.e.cancelPreparation(seat);
    return '%1|0|/tmp|80|24|1';
@@ -147,7 +232,7 @@ for(const boundary of ['writeFile','load-buffer','key-list'])it(`actual tmux ada
 
 it('late completion of cancelled manual request cannot overwrite an explicit retry',async()=>{
  const f=fixture();const original=f.tmux.sendKeys.getMockImplementation()!;
- f.tmux.sendKeys.mockImplementationOnce(async(...args)=>{stageMap(f);return original(...args);});
+ f.tmux.sendKeys.mockImplementationOnce(async(...args)=>{publish(f);return original(...args);});
  let release!:(value:any)=>void;
  vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(()=>new Promise(r=>{release=r;}));
  const old=f.e.triggerManualCompact(input,{operatorInitiated:true});
@@ -163,7 +248,7 @@ it('late completion of cancelled manual request cannot overwrite an explicit ret
 });
 
 it('uncertain compact receipt never replays an already submitted command',async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
+ const f=fixture();await f.e.maybeAutoCompact(input);publish(f);
  const send=f.transport.send.bind(f.transport);
  vi.spyOn(f.transport,'send').mockImplementationOnce(async(...args)=>{await send(...args);throw new Error('receipt lost after input');});
  await f.e.maybeAutoCompact(input);f.advance(60_001);
@@ -202,7 +287,7 @@ it('manual started while auto was off still disarms on a subsequently observed d
  const f=fixture();f.policy.enabled=false;
  f.onSleep(async()=>{
   f.policy.enabled=true;f.e.reconcilePreparations();
-  f.policy.enabled=false;f.e.reconcilePreparations();stageMap(f);
+  f.policy.enabled=false;f.e.reconcilePreparations();publish(f);
  });
  expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'disabled'});
  f.policy.enabled=true;await f.e.maybeAutoCompact(input);
@@ -216,7 +301,7 @@ it('manual preparation names the request and its existing UTC deadline, includin
  vi.spyOn(f.settings,'resolveClaudeCompactionPolicy').mockImplementationOnce(()=>{f.advance(250);return f.policy;});
  const keys=f.tmux.sendKeys.getMockImplementation()!;
  f.tmux.sendKeys.mockImplementationOnce(async(...args)=>{f.advance(10_000);return keys(...args);});
- f.onSleep(async()=>{stageMap(f);});
+ f.onSleep(async()=>{publish(f);});
  expect((await f.e.triggerManualCompact({...input,usedPercentage:4},{operatorInitiated:true})).triggered).toBe(true);
  const prompt=f.writes[0]!;
  expect(prompt).toContain('OpenRig manual compaction was requested');
@@ -242,15 +327,13 @@ it('automatic preparation gives the post-delivery ceiling without a fabricated p
  expect(prompt).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
  expect(f.e.getPreparationState(seat)?.deadlineAt).toBe(f.clock()+AUTO_PREP_WAIT_MS_DEFAULT);
  expect(prompt).toContain('Keep the normal ranked restore-map content');
- expect(prompt).toContain('ordinary file-edit tool');
- expect(prompt).toContain('OpenRig will atomically publish');
- expect(prompt).not.toContain('then atomically rename it');
+ expect(prompt).toContain('atomically rename');
  expect(prompt).toContain(f.e.getPreparationState(seat)!.marker);
 });
 
 for(const expiry of ['missing map','idle after completed map'])it(`route reports incomplete preparation on ${expiry} expiry`,async()=>{
  const f=fixture();
- if(expiry==='idle after completed map')f.onSleep(async()=>{stageMap(f);f.activity('busy');});
+ if(expiry==='idle after completed map')f.onSleep(async()=>{publish(f);f.activity('busy');});
  vi.spyOn(f.transport,'resolveSessions').mockResolvedValue({ok:true,sessions:[seat]} as any);
  const app=new Hono();
  app.use('*',async(c,next)=>{
@@ -289,7 +372,7 @@ function routeFixture(f:ReturnType<typeof fixture>, cwd?:string){
 }
 
 it('preparation receipt: later permission refusal discloses the delivered prep and its exact attempt',async()=>{
- const f=fixture();f.onSleep(async()=>{stageMap(f);f.activity('needs_input');});
+ const f=fixture();f.onSleep(async()=>{publish(f);f.activity('needs_input');});
  const res=await routeFixture(f)();const body=await res.json();
  expect(res.status).toBe(409);expect(body.reason).toBe('target_needs_input');
  expect(body.preparation).toMatchObject({attemptId:f.e.getPreparationState(seat)!.attemptId,delivery:'delivered'});
@@ -311,7 +394,7 @@ it('preparation receipt: positive permission prompt before prep is an unsent ref
 it('registered cwd: manual route selects a self-ignoring map inside the launch workspace',async()=>{
  const f=fixture();const cwd=join(f.home,'code repo');mkdirSync(cwd);
  execFileSync('git',['-c','init.templateDir=','init','--quiet',cwd]);
- f.onSleep(async()=>{stageMap(f);});
+ f.onSleep(async()=>{publish(f);});
  expect((await routeFixture(f,cwd)()).status).toBe(200);
  const a=f.e.getPreparationState(seat)!;
  expect(a.mapPath).toBe(join(cwd,'.openrig','compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
@@ -352,7 +435,7 @@ it('preparation contract: prompt qualifies later refusal and the shipped skill f
 });
 
 it('preparation receipt: unknown activity at the final short send is not an unsent refusal',async()=>{
- const f=fixture(10_000);f.onSleep(async()=>{stageMap(f);});
+ const f=fixture(10_000);f.onSleep(async()=>{publish(f);});
  const wait=f.transport.waitUntilIdle.bind(f.transport);
  vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async(...args)=>{
   const result=await wait(...args);f.activity('unknown');return result;
@@ -397,7 +480,7 @@ it('workspace setup: publishes only after creating the actual attempt parent',as
  const a=f.e.getPreparationState(seat)!;
  expect(statSync(dirname(a.mapPath)).isDirectory()).toBe(true);
  expect(a.mapPath).toBe(join(cwd,'.openrig','compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
- stageMap(f);await f.e.maybeAutoCompact({...input,cwd});expect(compacts(f)).toHaveLength(1);
+ publish(f);await f.e.maybeAutoCompact({...input,cwd});expect(compacts(f)).toHaveLength(1);
 });
 it.skipIf(process.getuid?.()===0)('workspace setup: an unwritable descendant selects the home fallback',async()=>{
  const f=fixture(),cwd=join(f.home,'repo'),parent=join(cwd,'.openrig','compaction','preparation');mkdirSync(parent,{recursive:true});chmodSync(parent,0o500);
@@ -405,55 +488,4 @@ it.skipIf(process.getuid?.()===0)('workspace setup: an unwritable descendant sel
   await f.e.maybeAutoCompact({...input,cwd});const a=f.e.getPreparationState(seat)!;
   expect(a.mapPath).toBe(join(f.home,'compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
  }finally{chmodSync(parent,0o700);}
-});
-
-for(const mode of ['automatic','manual'])it(`${mode}: daemon publishes the complete temp bytes before compact input`,async()=>{
- const f=fixture();let completed='';let inode=0;
- const finish=()=>{stageMap(f);const a=f.e.getPreparationState(seat)!;completed=readFileSync(a.mapPath+'.tmp','utf8');inode=statSync(a.mapPath+'.tmp').ino;expect(existsSync(a.mapPath)).toBe(false);};
- const send=f.tmux.sendText.getMockImplementation()!;
- f.tmux.sendText.mockImplementation(async(...args)=>{
-  if(args[1].startsWith('/compact')){
-   const a=f.e.getPreparationState(seat)!;
-   expect(readFileSync(a.mapPath,'utf8')).toBe(completed);
-   expect(statSync(a.mapPath).ino).toBe(inode);expect(existsSync(a.mapPath+'.tmp')).toBe(false);
-  }
-  return send(...args);
- });
- if(mode==='manual'){f.onSleep(async()=>{finish();});expect((await f.e.triggerManualCompact(input,{operatorInitiated:true})).triggered).toBe(true);}
- else{await f.e.maybeAutoCompact(input);finish();await f.e.maybeAutoCompact(input);}
- expect(compacts(f)).toHaveLength(1);
-});
-it('an already complete final map remains compatible and is not overwritten by temp bytes',async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
- const a=f.e.getPreparationState(seat)!;renameSync(a.mapPath+'.tmp',a.mapPath);
- const original=readFileSync(a.mapPath,'utf8'),inode=statSync(a.mapPath).ino;
- writeFileSync(a.mapPath+'.tmp',`different map\n${a.marker}\n`);
- await f.e.maybeAutoCompact(input);
- expect(compacts(f)).toHaveLength(1);expect(readFileSync(a.mapPath,'utf8')).toBe(original);expect(statSync(a.mapPath).ino).toBe(inode);
-});
-it('failed publication retains the temp map and sends no compact',async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
- const a=f.e.getPreparationState(seat)!;mkdirSync(a.mapPath);
- await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
- expect(compacts(f)).toHaveLength(0);expect(readFileSync(a.mapPath+'.tmp','utf8')).toContain(a.marker);
-});
-for(const end of ['expiry','cancel','disable','replacement'])it(`manual ${end} during idle wait never publishes the temp or compacts`,async()=>{
- const f=fixture();f.onSleep(async()=>{stageMap(f);});
- const idle=vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async()=>{
-  if(end==='expiry')f.advance(1001);
-  if(end==='cancel')f.e.cancelPreparation(seat);
-  if(end==='disable')f.policy.enabled=false;
-  if(end==='replacement')f.generation('generation-two');
-  return {ok:true,activity:{state:'idle',reason:'fixture',evidenceSource:'fixture'},waitedMs:0,attempts:1} as any;
- });
- expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:{expiry:'preparation_incomplete',cancel:'preparation_cancelled',disable:'disabled',replacement:'stale_generation'}[end]});
- expect(idle).toHaveBeenCalledTimes(1);
- expect(compacts(f)).toHaveLength(0);expect(existsSync(f.e.getPreparationState(seat)!.mapPath)).toBe(false);
-});
-it('legacy fallback parent is created before asking the seat to edit its temp file',async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);
- const a=f.e.getPreparationState(seat)!;
- expect(statSync(dirname(a.mapPath)).isDirectory()).toBe(true);
- writeFileSync(a.mapPath+'.tmp',`# legacy map\n${a.marker}\n`);
- await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
 });

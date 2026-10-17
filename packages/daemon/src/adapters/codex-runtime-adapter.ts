@@ -68,10 +68,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: CodexAdapterFsOps;
   private listProcesses: () => CodexProcess[] | Promise<CodexProcess[]>;
-  private readThreadIdByPid: (pid: number) => Promise<string | undefined> | string | undefined;
+  private readThreadIdByPid: (pid: number, binding?: NodeBinding) => Promise<string | undefined> | string | undefined;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private codexHome?: string;
+  private resolveSeatHome?: (binding: { tmuxSession?: string | null; cwd?: string | null }) => string | undefined;
   private launchPath?: string;
   // Housekeeping B1 fixback (guard-blocking, arch HK-AR-1 = whole-probe DI):
   // the Codex profile-LOAD probe is an injectable dep in the adapter's
@@ -107,6 +108,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     activityRelayPath?: string;
     /** Explicit CODEX_HOME; absent preserves the legacy OS/PID home behavior. */
     codexHome?: string;
+    resolveSeatHome?: (binding: { tmuxSession?: string | null; cwd?: string | null }) => string | undefined;
     /** Match the daemon's prerequisite probe even if the pane's login shell rewrites PATH. */
     launchPath?: string;
     verifyProfilePreflight?: (profile: string) => Promise<CodexProfileProbeResult>;
@@ -120,13 +122,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
+    this.resolveSeatHome = deps.resolveSeatHome;
     this.launchPath = deps.launchPath;
     this.detectDaemonSupport = deps.detectDaemonSupport;
     this.readNetworkDefault = deps.readNetworkDefault;
     this.resolveGitAddDirs = deps.resolveGitAddDirs ?? resolveCodexGitAddDirs;
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
-    this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
+    this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid, binding) => this.readThreadIdFromLogs(pid, binding));
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.verifyProfilePreflight = deps.verifyProfilePreflight
@@ -145,6 +148,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * that lived inside the auto-injected activity-hook provisioning path
    * pre-rip (plugin-primitive Phase 3a slice 3.1).
    */
+  setSeatHomeResolver(resolve: (binding: { tmuxSession?: string | null; cwd?: string | null }) => string | undefined): void {
+    this.resolveSeatHome = resolve;
+  }
+
   ensureCodexFeatureFlag(enabled: boolean, opts?: { codexVersion?: string }): void {
     if (!enabled) return;
     if (!opts?.codexVersion) return;
@@ -179,7 +186,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * codex TUI launch lacks that context and may not deliver SessionStart — not how OpenRig
    * launches seats.)
    */
-  ensureCodexActivityHooks(): void {
+  ensureCodexActivityHooks(codexHome?: string): void {
     const relay = this.activityRelayPath;
     if (!relay || !this.fs.exists(relay)) {
       if (relay) {
@@ -187,7 +194,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
       return;
     }
-    const configPath = this.resolveCodexConfigPath();
+    const configPath = this.resolveCodexConfigPath(codexHome);
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
     const withHooks = upsertCodexActivityHooks(existing, relay);
     if (withHooks !== existing) {
@@ -276,7 +283,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
 
       try {
-        const didProject = this.projectEntry(entry, binding.cwd, warnings);
+        const didProject = this.projectEntry(entry, binding.cwd, warnings, this.resolveSeatHome?.(binding));
         if (didProject) {
           projected.push(entry.effectiveId);
         } else {
@@ -563,12 +570,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return observation ? JSON.stringify([paneCommand, observation.fingerprint]) : null;
   }
 
-  ensureManagedBootstrap(binding: { cwd?: string | null }): void {
-    this.provisionWorkspaceTrust(binding.cwd ?? null);
+  ensureManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+    const home = this.resolveSeatHome?.({ ...binding, cwd: binding.cwd ?? "." });
+    this.provisionWorkspaceTrust(binding.cwd ?? null, home);
+    if (home) this.ensureCodexActivityHooks(home);
   }
 
-  private projectEntry(entry: ProjectionEntry, cwd: string, warnings: string[]): boolean {
-    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry)) {
+  private projectEntry(entry: ProjectionEntry, cwd: string, warnings: string[], codexHome?: string): boolean {
+    if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, codexHome)) {
       return true;
     }
 
@@ -670,12 +679,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
-  private applyRuntimeResource(entry: ProjectionEntry): boolean {
+  private applyRuntimeResource(entry: ProjectionEntry, codexHome?: string): boolean {
     if (entry.resourceType !== "codex_config_fragment") {
       return false;
     }
 
-    const configPath = this.resolveCodexConfigPath();
+    const configPath = this.resolveCodexConfigPath(codexHome);
     this.fs.mkdirp(nodePath.dirname(configPath));
 
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
@@ -721,9 +730,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return resolveConcreteHint(path, content);
   }
 
-  private provisionWorkspaceTrust(cwd: string | null): void {
+  private provisionWorkspaceTrust(cwd: string | null, codexHome?: string): void {
     if (!cwd) return;
-    const configPath = this.resolveCodexConfigPath();
+    const configPath = this.resolveCodexConfigPath(codexHome);
     this.fs.mkdirp(nodePath.dirname(configPath));
 
     let content = "";
@@ -740,8 +749,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.fs.writeFile(configPath, content);
   }
 
-  private resolveCodexConfigPath(): string {
-    const root = this.codexHome
+  private resolveCodexConfigPath(codexHome?: string): string {
+    const root = codexHome ?? this.codexHome
       ?? nodePath.join(this.fs.homedir ?? os.homedir(), ".codex");
     return nodePath.join(root, "config.toml");
   }
@@ -784,7 +793,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (shellPid) {
         const codexPids = await this.findCodexDescendantPids(shellPid);
         for (const codexPid of codexPids) {
-          const threadId = await this.readThreadIdByPid(codexPid);
+          const threadId = await this.readThreadIdByPid(codexPid, binding);
           if (threadId) return threadId;
         }
       }
@@ -910,12 +919,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return findCodexDescendantPids(processes, parentPid);
   }
 
-  private async readThreadIdFromLogs(pid: number): Promise<string | undefined> {
+  private async readThreadIdFromLogs(pid: number, binding?: NodeBinding): Promise<string | undefined> {
+    const codexHome = (binding ? this.resolveSeatHome?.(binding) : undefined) ?? this.codexHome;
     return readCodexThreadIdFromCandidateHomes(
       pid,
-      this.codexHome ? [] : [await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
+      codexHome ? [] : [await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
       (path) => this.fs.exists(path),
-      this.codexHome,
+      codexHome,
     );
   }
 
@@ -1018,11 +1028,14 @@ function canonicalizeJsonValue(value: unknown): unknown {
   return value;
 }
 
-const CODEX_HOOK_EVENT_KEY_LABEL: Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], string> = {
+type TrustedCodexHookEvent = (typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number] | "PreToolUse" | "PostToolUse";
+const CODEX_HOOK_EVENT_KEY_LABEL: Record<TrustedCodexHookEvent, string> = {
   SessionStart: "session_start",
   UserPromptSubmit: "user_prompt_submit",
   Stop: "stop",
   PermissionRequest: "permission_request",
+  PreToolUse: "pre_tool_use",
+  PostToolUse: "post_tool_use",
 };
 
 export interface CodexHookTrustInput {
@@ -1048,7 +1061,7 @@ export interface CodexHookTrustInput {
  * PROVISIONAL-until-VM-read-back caveat.
  */
 export function computeCodexHookTrust(
-  event: (typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number],
+  event: TrustedCodexHookEvent,
   input: CodexHookTrustInput,
 ): { key: string; hash: string } {
   const label = CODEX_HOOK_EVENT_KEY_LABEL[event];

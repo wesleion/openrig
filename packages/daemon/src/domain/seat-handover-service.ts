@@ -269,6 +269,8 @@ export class SeatHandoverService {
     source?: string | null;
     operator?: string | null;
     dryRun?: boolean;
+    /** Internal automatic-renewal guard, called under the lifecycle lease immediately before replacement. */
+    beforeReplacement?: () => Promise<boolean>;
   }): Promise<SeatHandoverResult> {
     if (input.dryRun) {
       const planResult = this.planner.plan({ ...input, dryRun: true });
@@ -451,6 +453,10 @@ export class SeatHandoverService {
     const effectivePermissionMode = permissionOverride.permissionMode ?? (effectivePosture === "auto" && node.runtime === "claude-code" ? "auto" : undefined);
     // The successor must carry its own generation from its first byte. This reservation writes no
     // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
+    if (input.beforeReplacement && !await input.beforeReplacement()) {
+      return { ok: false, code: "successor_create_failed", message: "Automatic renewal guard changed; no successor was created.",
+        guidance: "Keep the obligation queued and re-resolve its current recipient." };
+    }
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.

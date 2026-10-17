@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, type ComponentProps } from "react";
 import { Handle, Position } from "@xyflow/react";
 import { displayAgentName } from "../lib/display-name.js";
 import { cn } from "../lib/utils.js";
@@ -21,13 +21,20 @@ import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "
 import { formatRuntimeModel } from "../lib/runtime-brand.js";
 import { postOpenCmux } from "../hooks/useCmuxLaunch.js";
 import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
+import { ControllerModeControl, RuntimeMetricsDetails, type ControllerView, type NativeContextView } from "./ControllerControls.js";
 
 interface RigNodeData {
   logicalId: string;
+  nodeId?: string;
   rigId?: string;
   role: string | null;
   runtime: string | null;
   model: string | null;
+  effort?: string | null;
+  controller?: ControllerView | null;
+  contextUsage?: NativeContextView | null;
+  activityState?: ComponentProps<typeof RuntimeMetricsDetails>["activityState"];
+  runtimeMetadata?: { model?: string | null; effort?: string | null; effortDefault?: string | null; sampledAt?: string | null; source?: string | null } | null;
   status: string | null;
   packageRefs?: string[];
   nodeKind?: "agent" | "infrastructure";
@@ -102,7 +109,17 @@ export function RigNode({ data }: { data: RigNodeData }) {
     };
   }, []);
 
-  const runtimeTitle = data.runtime || data.model ? formatRuntimeModel(data.runtime, data.model) : null;
+  const model = data.runtimeMetadata?.model ?? data.controller?.model ?? data.model;
+  const nativeEffort = data.runtimeMetadata?.effort ?? data.effort;
+  const effort = isInfra ? "N/A" : nativeEffort === "default" ? data.runtimeMetadata?.effortDefault ? `${data.runtimeMetadata.effortDefault}, padrão` : "padrão" : nativeEffort ?? "—";
+  const modelTitle = data.runtimeMetadata?.model
+    ? `Modelo observado · ${data.runtimeMetadata.source ?? "runtime"}${data.runtimeMetadata.sampledAt ? ` · ${data.runtimeMetadata.sampledAt}` : ""}`
+    : data.controller?.model ? "Modelo do controlador" : "Modelo declarado; execução não observada";
+  const effortTitle = isInfra ? "Esforço não se aplica à infraestrutura"
+    : nativeEffort === "default" ? "Padrão do catálogo nativo; nível efetivo não registrado pela sessão"
+    : data.runtimeMetadata?.effort ? `Esforço observado · ${data.runtimeMetadata.source ?? "runtime"}`
+      : data.effort ? "Esforço declarado; execução não observada" : "Esforço indisponível";
+  const runtimeTitle = data.runtime || model ? formatRuntimeModel(data.runtime, model) : null;
   const agentName = displayAgentName(data.logicalId);
 
   // PL-019: dot color is now driven by agentActivity.state, not startupStatus.
@@ -241,12 +258,11 @@ export function RigNode({ data }: { data: RigNodeData }) {
           {data.canonicalSessionName ?? data.logicalId}
         </div>
 
-        <div className="min-w-0">
+        <div className="min-w-0" title={modelTitle}>
           <RuntimeBadge
             runtime={data.runtime}
-            model={data.model}
+            model={model}
             size="xs"
-            compact
             variant="inline"
             className="max-w-full"
           />
@@ -256,6 +272,12 @@ export function RigNode({ data }: { data: RigNodeData }) {
             </span>
           ) : null}
         </div>
+        <div className="truncate font-mono text-[8px] text-on-surface-variant" title={effortTitle} data-testid="effort-badge">
+          esforço {effort}
+        </div>
+        {data.controller ? (
+          <ControllerModeControl rigId={data.rigId} nodeId={data.nodeId} controller={data.controller} readOnly={data.remoteReadonly === true} />
+        ) : null}
 
         {/* Spec hint */}
         {data.resolvedSpecName && (
@@ -291,6 +313,8 @@ export function RigNode({ data }: { data: RigNodeData }) {
             {tokenLabel ?? "--"}
           </div>
         </div>
+
+        <RuntimeMetricsDetails contextUsage={data.contextUsage} activityState={data.activityState} />
 
         {/* Restore outcome */}
         {data.restoreOutcome && data.restoreOutcome !== "n-a" && (

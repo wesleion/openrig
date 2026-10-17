@@ -150,6 +150,8 @@ export interface ArbitratedSeatState {
   /** Monotonic arbitrated-state sequence (wait-after-seq consumes it). */
   seq: number;
   changedAt: string;
+  /** Activity duration is independent of changes to input reasons or evidence authority. */
+  activityStartedAt: string;
   rungs: Array<{ rung: EvidenceRungId; sourceId: string; trust: RungTrust; lastEvidenceAt: string | null }>;
   /** The occupant swap is its OWN visible event, never an activity transition. */
   lastSwap: { generation: string; at: string } | null;

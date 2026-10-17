@@ -103,6 +103,7 @@ export class RigSpecCodec {
     // OPR.0.4.8.3 Seam B: rig-level permission_policy ref round-trips through serialization.
     if (spec.permissionPolicy) doc["permission_policy"] = spec.permissionPolicy;
     if (spec.nonInterruptive !== undefined) doc["non_interruptive"] = spec.nonInterruptive;
+    if (spec.sessionRenewal) doc["session_renewal"] = spec.sessionRenewal;
     if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
@@ -159,6 +160,8 @@ export class RigSpecCodec {
         if (m.codexConfigProfile) member["codex_config_profile"] = m.codexConfigProfile;
         if (m.model) member["model"] = m.model;
         if (m.effort) member["effort"] = m.effort;
+        if (m.controller) member["controller"] = m.controller;
+        if (m.sessionRenewal) member["session_renewal"] = m.sessionRenewal;
         // OPR.0.4.6.FAC1: role round-trips through spec serialization.
         if (m.role) member["role"] = m.role;
         // OPR.0.4.8.3 Seam B: per-seat permission_policy ref round-trips through spec serialization.

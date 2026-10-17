@@ -405,11 +405,12 @@ Examples:
 
   cmd
     .option("--json", "JSON output for agents")
+    .option("--history", "Include persisted compaction attempts without sending anything")
     .option("--rig <name>", "Plan one rig only")
     .option("--refresh", "Re-sample context usage before planning")
     .option("--threshold-tokens <n>", "Estimated used-token threshold for Claude compact-plan candidates")
     .option("--threshold-percent <0-100>", "Used-percent threshold when context window size is missing")
-    .action(async (opts: { json?: boolean; rig?: string; refresh?: boolean; thresholdTokens?: string; thresholdPercent?: string }) => {
+    .action(async (opts: { json?: boolean; history?: boolean; rig?: string; refresh?: boolean; thresholdTokens?: string; thresholdPercent?: string }) => {
       const deps = getDepsF();
       const thresholds = parseThresholdOptions(opts);
       if (!thresholds.ok) {
@@ -489,10 +490,18 @@ Examples:
         }
 
         const plan = buildPlan(allNodes, thresholds.value, incompleteRigs);
+        const history: Array<{ session: string; state: unknown }> = [];
+        if (opts.history) {
+          for (const node of allNodes.filter(n => n.runtime === "claude-code" && n.canonicalSessionName)) {
+            const result = await client.get(`/api/compaction/state?session=${encodeURIComponent(node.canonicalSessionName!)}`);
+            history.push({ session: node.canonicalSessionName!, state: result.status === 200 ? result.data : { error: `HTTP ${result.status}` } });
+          }
+        }
         if (opts.json) {
-          console.log(JSON.stringify(plan, null, 2));
+          console.log(JSON.stringify(opts.history ? { ...plan, compactionHistory: history } : plan, null, 2));
         } else {
           printHuman(plan);
+          if (opts.history) console.log(JSON.stringify({ compactionHistory: history }, null, 2));
         }
         if (incompleteRigs.length > 0) process.exitCode = 1;
       } catch (err) {

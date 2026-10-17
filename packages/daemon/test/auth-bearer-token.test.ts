@@ -154,20 +154,20 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
     });
 
     // Scenario 2: Tailscale IPv4 bind, no bearer → OK
-    it("(2) tailscale IPv4 100.95.124.51 with no bearer → OK", async () => {
+    it("(2) tailscale IPv4 without bearer is refused", async () => {
       await expect(
         assertBindAuthInvariant({ host: "100.95.124.51", bearerToken: null }),
-      ).resolves.toBeUndefined();
+      ).rejects.toThrow(AuthBearerTokenStartupError);
     });
 
     // Scenario 3: Tailscale magicDNS hostname → OK (DNS resolves to tailscale IP)
-    it("(3) magicDNS hostname that resolves to tailscale IP → OK", async () => {
+    it("(3) magicDNS resolving to tailscale also requires bearer", async () => {
       const dns = await import("node:dns");
       const spy = vi.spyOn(dns.promises, "lookup").mockResolvedValue({ address: "100.95.124.51", family: 4 } as unknown as never);
       try {
         await expect(
           assertBindAuthInvariant({ host: "host.tail-scale-net.ts.net", bearerToken: null }),
-        ).resolves.toBeUndefined();
+        ).rejects.toThrow(AuthBearerTokenStartupError);
       } finally {
         spy.mockRestore();
       }

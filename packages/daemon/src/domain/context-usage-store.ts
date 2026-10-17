@@ -1,8 +1,10 @@
 import Database from "better-sqlite3";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import os from "node:os";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { resolveCodexDbPaths } from "./codex-thread-id.js";
+import { readNativeCodexObservation, readCodexCatalogDefault, type CodexTokenCountEvent, type NativeCodexObservation } from "./native-codex-observation.js";
+import { readClaudeRuntimeMetadata } from "./native-claude-metadata.js";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
 import { parseSqliteUtcMs } from "./sqlite-time.js";
 import {
@@ -23,9 +25,11 @@ export interface ContextUsageStoreOpts {
   // reading sampled BEFORE the current occupant booted (a prior generation) is rejected instead of
   // driving the threshold. null = UNKNOWN → the gate is inert (note-2).
   resolveOccupantBootAt?: (nodeId: string) => string | null;
+  resolveOccupantGeneration?: (nodeId: string) => string | null;
 }
 
 interface SidecarRaw {
+  model?: { id?: unknown; display_name?: unknown };
   context_window?: {
     context_window_size?: number;
     used_percentage?: number;
@@ -66,37 +70,24 @@ interface CodexThreadRow {
   rollout_path: string;
 }
 
-interface CodexTokenUsageRaw {
-  input_tokens?: number;
-  output_tokens?: number;
-  total_tokens?: number;
-}
-
-interface CodexTokenCountEvent {
-  timestamp?: string;
-  payload?: {
-    type?: string;
-    rate_limits?: unknown;
-    info?: {
-      last_token_usage?: CodexTokenUsageRaw;
-      model_context_window?: number;
-    };
-  };
-}
+import { SessionRenewalStore, currentContextInput } from "./session-renewal-store.js";
 
 export class ContextUsageStore {
+  private readonly verifiedCodexGenerations = new WeakMap<ContextUsage, string>();
   readonly db: Database.Database;
   private stateDir: string;
   private codexHomeDir: string | null;
   private codexHome?: string;
 
   private readonly resolveOccupantBootAt?: (nodeId: string) => string | null;
+  private readonly resolveOccupantGeneration?: (nodeId: string) => string | null;
   constructor(db: Database.Database, opts: ContextUsageStoreOpts) {
     this.db = db;
     this.stateDir = opts.stateDir;
     this.codexHomeDir = opts.codexHomeDir ?? safeHomeDir();
     this.codexHome = opts.codexHome;
     this.resolveOccupantBootAt = opts.resolveOccupantBootAt;
+    this.resolveOccupantGeneration = opts.resolveOccupantGeneration;
   }
 
   /**
@@ -169,27 +160,42 @@ export class ContextUsageStore {
   }
 
   /** Read the latest Codex token_count event for a thread and normalize it. */
-  readCodexAndNormalize(input: { threadId: string | null | undefined; sessionName: string }): ContextUsage {
+  readCodexAndNormalize(input: { threadId: string | null | undefined; sessionName: string; codexHome?: string; verifiedGeneration?: string }): ContextUsage {
     const threadId = input.threadId?.trim();
     if (!threadId) return this.unknownUsage("no_data");
 
-    const thread = this.readCodexThread(threadId);
+    const thread = this.readCodexThread(threadId, input.codexHome);
     if (!thread?.rollout_path) return this.unknownUsage("no_data");
 
-    const tokenEvent = this.readLatestCodexTokenCount(thread.rollout_path);
-    if (!tokenEvent) return this.unknownUsage("no_data");
-
-    return this.normalizeCodexTokenCount({
+    const observation = readNativeCodexObservation(thread.rollout_path);
+    if (observation.runtimeMetadata.effort === "default" && input.codexHome) {
+      const catalog = readCodexCatalogDefault(input.codexHome, observation.runtimeMetadata.model);
+      if (catalog) {
+        observation.runtimeMetadata.effortDefault = catalog.effort;
+        observation.runtimeMetadata.effortDefaultSampledAt = catalog.sampledAt;
+      }
+    }
+    const tokenEvent = observation.tokenCount;
+    const normalized = !tokenEvent ? { ...this.unknownUsage("no_data"), transcriptPath: thread.rollout_path,
+      sessionId: threadId, sessionName: input.sessionName, execution: observation.execution, runtimeMetadata: observation.runtimeMetadata }
+      : this.normalizeCodexTokenCount({
       event: tokenEvent,
       sessionName: input.sessionName,
       threadId,
       transcriptPath: thread.rollout_path,
+      observation,
     });
+    // Explicit roots and UUIDs come only from the monitor's verified live-process join.
+    // Preserve the native event time: adoption/resume does not create a fresh inference.
+    if (input.codexHome && input.verifiedGeneration?.trim()) {
+      this.verifiedCodexGenerations.set(normalized, input.verifiedGeneration);
+    }
+    return normalized;
   }
 
   /** Resolve an explicitly selected native thread, even before its first token count. */
-  readCodexTranscriptPath(threadId: string): string | null {
-    return this.readCodexThread(threadId)?.rollout_path ?? null;
+  readCodexTranscriptPath(threadId: string, codexHome?: string): string | null {
+    return this.readCodexThread(threadId, codexHome)?.rollout_path ?? null;
   }
 
   /** Normalize raw sidecar data into a ContextUsage record. */
@@ -205,6 +211,15 @@ export class ContextUsageStore {
 
     const sampledAt = raw.sampled_at ?? null;
     const fresh = sampledAt ? this.isFresh(sampledAt) : false;
+    const transcriptMetadata = readClaudeRuntimeMetadata(raw.transcript_path, raw.session_id);
+    const statusModel = typeof raw.model?.id === "string" && raw.model.id.trim() ? raw.model.id.trim() : null;
+    const runtimeMetadata = statusModel ? {
+      model: statusModel,
+      effort: transcriptMetadata?.model === statusModel ? transcriptMetadata.effort : null,
+      sampledAt,
+      source: transcriptMetadata?.model === statusModel && transcriptMetadata.effort
+        ? "claude_statusline_and_transcript" : "claude_statusline_json",
+    } : transcriptMetadata;
 
     return {
       availability: "known",
@@ -221,6 +236,9 @@ export class ContextUsageStore {
       sessionName: raw.session_name ?? null,
       sampledAt,
       fresh,
+      // Rendering a statusline is not an inference. Only the native response clock ages the cache.
+      ...this.claudeInference(cw.current_usage, transcriptMetadata?.sampledAt ?? null),
+      ...(runtimeMetadata ? { runtimeMetadata } : {}),
     };
   }
 
@@ -230,13 +248,18 @@ export class ContextUsageStore {
     sessionName: string;
     threadId: string;
     transcriptPath: string;
+    observation: NativeCodexObservation;
   }): ContextUsage {
     const info = input.event.payload?.info;
     const usage = info?.last_token_usage;
+    const cumulative = info?.total_token_usage;
     const contextWindowSize = info?.model_context_window;
 
-    if (!usage || typeof contextWindowSize !== "number" || contextWindowSize <= 0) {
-      return this.unknownUsage("parse_error");
+    if (!usage || (usage.input_tokens === undefined && usage.output_tokens === undefined && usage.total_tokens === undefined)
+      || typeof contextWindowSize !== "number" || contextWindowSize <= 0) {
+      return { ...this.unknownUsage("parse_error"), transcriptPath: input.transcriptPath,
+        sessionId: input.threadId, sessionName: input.sessionName,
+        execution: input.observation.execution, runtimeMetadata: input.observation.runtimeMetadata };
     }
 
     const inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
@@ -255,10 +278,16 @@ export class ContextUsageStore {
       usedPercentage,
       remainingPercentage,
       contextWindowSize,
-      totalInputTokens: inputTokens,
-      totalOutputTokens: outputTokens,
+      totalInputTokens: cumulative?.input_tokens ?? null,
+      totalOutputTokens: cumulative?.output_tokens ?? null,
+      totalCachedInputTokens: cumulative?.cached_input_tokens ?? null,
+      lastInference: { inputTokens, outputTokens, cachedInputTokens: usage.cached_input_tokens ?? null,
+        totalTokens, at: sampledAt },
+      execution: input.observation.execution,
+      runtimeMetadata: input.observation.runtimeMetadata,
       currentUsage: this.normalizeCurrentUsage({
         last_token_usage: usage,
+        total_token_usage: cumulative,
         model_context_window: contextWindowSize,
       }),
       transcriptPath: input.transcriptPath,
@@ -305,10 +334,11 @@ export class ContextUsageStore {
       usage.contextWindowSize,
       usage.totalInputTokens,
       usage.totalOutputTokens,
-      usage.currentUsage,
+      this.packUsage(usage),
       usage.transcriptPath,
       usage.sampledAt,
     );
+    new SessionRenewalStore(this.db).observeBaseline(nodeId, usage);
   }
 
   /** Get context usage for a single node. Session-aware: mismatched session returns unknown. */
@@ -326,11 +356,12 @@ export class ContextUsageStore {
     // GHOST-STAGE (c-id): generation guard. Under handover the name is REUSED, so session_mismatch
     // passes while the table still holds the retiree's pre-boot reading (the mixed-gen window).
     // Reject readings from before the live occupant booted → insufficient-data, evaluate current-gen only.
-    if (this.isPriorGenerationReading(nodeId, row.sampled_at)) {
+    const verifiedGeneration = this.codexGenerationVerdict(nodeId, row);
+    if (verifiedGeneration === "mismatch" || (this.isPriorGenerationReading(nodeId, row.sampled_at) && verifiedGeneration !== "match")) {
       return this.unknownUsage("stale_generation");
     }
 
-    return this.rowToUsage(row);
+    return this.withRenewal(nodeId, this.rowToUsage(row));
   }
 
   /** Batch get context usage for multiple nodes. Session-aware per entry. */
@@ -365,12 +396,13 @@ export class ContextUsageStore {
       }
 
       // GHOST-STAGE (c-id): generation guard — see getForNode. Reject pre-boot (prior-gen) readings.
-      if (this.isPriorGenerationReading(entry.nodeId, row.sampled_at)) {
+      const verifiedGeneration = this.codexGenerationVerdict(entry.nodeId, row);
+      if (verifiedGeneration === "mismatch" || (this.isPriorGenerationReading(entry.nodeId, row.sampled_at) && verifiedGeneration !== "match")) {
         result.set(entry.nodeId, this.unknownUsage("stale_generation"));
         continue;
       }
 
-      result.set(entry.nodeId, this.rowToUsage(row));
+      result.set(entry.nodeId, this.withRenewal(entry.nodeId, this.rowToUsage(row)));
     }
 
     return result;
@@ -418,7 +450,7 @@ export class ContextUsageStore {
       contextWindowSize: row.context_window_size,
       totalInputTokens: row.total_input_tokens,
       totalOutputTokens: row.total_output_tokens,
-      currentUsage: row.current_usage,
+      ...this.unpackUsage(row.current_usage),
       transcriptPath: row.transcript_path,
       sessionId: row.session_id,
       sessionName: row.session_name,
@@ -437,8 +469,69 @@ export class ContextUsageStore {
     }
   }
 
-  private readCodexThread(threadId: string): CodexThreadRow | null {
-    for (const dbPath of this.resolveCodexStateDbPaths()) {
+  private claudeInference(value: unknown, at: string | null): Pick<ContextUsage, "lastInference"> {
+    let raw = value;
+    if (typeof raw === "string") { try { raw = JSON.parse(raw); } catch { return {}; } }
+    if (!raw || typeof raw !== "object") return {};
+    const record = raw as Record<string, unknown>;
+    const number = (name: string): number | null => typeof record[name] === "number"
+      && Number.isFinite(record[name]) && record[name] >= 0 ? record[name] : null;
+    const inputTokens = number("input_tokens");
+    const outputTokens = number("output_tokens");
+    const cachedInputTokens = number("cache_read_input_tokens");
+    const cacheCreation = number("cache_creation_input_tokens");
+    if (inputTokens === null && outputTokens === null && cachedInputTokens === null) return {};
+    return { lastInference: { inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens: cacheCreation,
+      totalTokens: inputTokens !== null && outputTokens !== null
+        ? inputTokens + outputTokens + (cachedInputTokens ?? 0) + (cacheCreation ?? 0) : null, at } };
+  }
+
+  /** Store typed additions without altering the legacy currentUsage response contract. */
+  private packUsage(usage: ContextUsage): string | null {
+    const verifiedCodexGeneration = this.verifiedCodexGenerations.get(usage);
+    if (usage.lastInference === undefined && usage.totalCachedInputTokens === undefined
+      && usage.execution === undefined && usage.runtimeMetadata === undefined && !verifiedCodexGeneration) return usage.currentUsage;
+    return JSON.stringify({ $openrigContextUsage: 1, currentUsage: usage.currentUsage,
+      lastInference: usage.lastInference, totalCachedInputTokens: usage.totalCachedInputTokens,
+      execution: usage.execution, runtimeMetadata: usage.runtimeMetadata, verifiedCodexGeneration });
+  }
+
+  private codexGenerationVerdict(nodeId: string, row: ContextUsageRow): "match" | "mismatch" | "unverified" {
+    if (!this.resolveOccupantGeneration || !row.current_usage) return "unverified";
+    try {
+      const envelope = JSON.parse(row.current_usage);
+      if (envelope?.$openrigContextUsage !== 1 || typeof envelope.verifiedCodexGeneration !== "string") return "unverified";
+      const current = this.resolveOccupantGeneration(nodeId);
+      return current && envelope.verifiedCodexGeneration === current ? "match" : "mismatch";
+    } catch { return "unverified"; }
+  }
+
+  private unpackUsage(value: string | null): Pick<ContextUsage, "currentUsage" | "lastInference" | "totalCachedInputTokens" | "execution" | "runtimeMetadata"> {
+    if (value) {
+      try {
+        const envelope = JSON.parse(value);
+        if (envelope && envelope.$openrigContextUsage === 1) {
+          return { currentUsage: typeof envelope.currentUsage === "string" ? envelope.currentUsage : null,
+            ...(envelope.lastInference !== undefined ? { lastInference: envelope.lastInference } : {}),
+            ...(envelope.totalCachedInputTokens !== undefined ? { totalCachedInputTokens: envelope.totalCachedInputTokens } : {}),
+            ...(envelope.execution !== undefined ? { execution: envelope.execution } : {}),
+            ...(envelope.runtimeMetadata !== undefined ? { runtimeMetadata: envelope.runtimeMetadata } : {}) };
+        }
+      } catch { /* Old opaque payloads remain readable. */ }
+    }
+    return { currentUsage: value };
+  }
+
+  private withRenewal(nodeId: string, usage: ContextUsage): ContextUsage {
+    const store = new SessionRenewalStore(this.db);
+    if (!store.available()) return usage;
+    const context = currentContextInput(usage);
+    return { ...usage, baselineInputTokens: store.baseline(nodeId, usage),
+      contextInputTokens: context?.tokens ?? null, contextInputSource: context?.source ?? null };
+  }
+
+  private readCodexThread(threadId: string, codexHome?: string): CodexThreadRow | null {
+    for (const dbPath of this.resolveCodexStateDbPaths(codexHome)) {
       try {
         const codexDb = new Database(dbPath, { readonly: true });
         try {
@@ -456,50 +549,12 @@ export class ContextUsageStore {
     return null;
   }
 
-  private resolveCodexStateDbPaths(): string[] {
-    return this.codexHome || this.codexHomeDir ? resolveCodexDbPaths(this.codexHomeDir ?? "", "state", undefined, this.codexHome) : [];
+  private resolveCodexStateDbPaths(codexHome?: string): string[] {
+    if (codexHome !== undefined && (!codexHome || !isAbsolute(codexHome))) return [];
+    const selectedHome = codexHome ?? this.codexHome;
+    return selectedHome || this.codexHomeDir ? resolveCodexDbPaths(this.codexHomeDir ?? "", "state", undefined, selectedHome) : [];
   }
 
-  private readLatestCodexTokenCount(rolloutPath: string): CodexTokenCountEvent | null {
-    let content: string;
-    try {
-      content = this.readTail(rolloutPath, 4_000_000);
-    } catch {
-      return null;
-    }
-
-    const lines = content.trimEnd().split("\n").reverse();
-    for (const line of lines) {
-      if (!line.includes("\"token_count\"")) continue;
-      try {
-        const parsed = JSON.parse(line) as CodexTokenCountEvent;
-        if (parsed.payload?.type === "token_count") {
-          // Native Codex also writes quota-only updates under token_count.
-          // They carry no context measurement and must not replace its timestamp.
-          if (parsed.payload.info == null && parsed.payload.rate_limits != null) continue;
-          return parsed;
-        }
-      } catch {
-        continue;
-      }
-    }
-
-    return null;
-  }
-
-  private readTail(filePath: string, maxBytes: number): string {
-    const stat = statSync(filePath);
-    const start = Math.max(0, stat.size - maxBytes);
-    const length = stat.size - start;
-    const fd = openSync(filePath, "r");
-    try {
-      const buffer = Buffer.alloc(length);
-      readSync(fd, buffer, 0, length, start);
-      return buffer.toString("utf-8");
-    } finally {
-      closeSync(fd);
-    }
-  }
 }
 
 function clampPercentage(value: number): number {

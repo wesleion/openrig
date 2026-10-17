@@ -85,7 +85,7 @@ export function mergeManagedBlock(
     if (!updated.includes(begin) || !updated.includes(end)) {
       updated = `${updated.trim()}\n\n${block}`.trim();
     }
-    fs.writeFile(targetPath, `${updated}\n`);
+    fs.writeFile(targetPath, updated);
     return;
   }
 

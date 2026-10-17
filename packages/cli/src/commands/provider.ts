@@ -167,7 +167,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         return;
       }
       const qs = new URLSearchParams({ seat: opts.seat, toAccount: opts.toAccount });
-      const res = await client.get<{ safe: boolean; reasons?: string[] }>(`/api/provider/precheck?${qs.toString()}`);
+      const res = await client.get<{ safe: boolean; reasons?: string[] }>(`/api/provider/precheck?${qs.toString()}`, { timeoutMs: 35_000 });
       if (handleHttpError(res, "precheck")) return;
       if (opts.json) console.log(JSON.stringify(res.data));
       else console.log(res.data.safe ? "SAFE" : `UNSAFE: ${(res.data.reasons ?? []).join(", ")}`);
@@ -180,8 +180,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .requiredOption("--seat <s>", "The seat session")
     .requiredOption("--to-account <a>", "The target account ref")
     .option("--force-unsafe", "Override a non-stranding precheck failure (still refuses to strand a live conversation)")
+    .option("--when-idle", "Persist the switch until idle with no draft, typing guard, compaction or renewal")
     .option("--json", "Output as parseable JSON")
-    .action(async (opts: { seat: string; toAccount: string; forceUnsafe?: boolean; json?: boolean }) => {
+    .action(async (opts: { seat: string; toAccount: string; forceUnsafe?: boolean; whenIdle?: boolean; json?: boolean }) => {
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
@@ -191,12 +192,40 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         seat: opts.seat,
         toAccount: opts.toAccount,
         forceUnsafe: opts.forceUnsafe ?? false,
-      });
+        ...(opts.whenIdle ? { whenIdle: true } : {}),
+      }, { timeoutMs: 120_000 });
       if (handleHttpError(res, "switch")) return;
       if (opts.json) console.log(JSON.stringify(res.data));
-      else console.log(res.data.outcome ?? "unknown");
+      else console.log([res.data.outcome ?? "unknown", ...(res.data.reasons ?? [])].join(": "));
       if (res.data.outcome === "failed_safely") process.exitCode = 1;
     });
 
+  cmd.command("rotation")
+    .description("Inspect automatic subscription rotation; unconfigured rigs are disabled")
+    .option("--rig <name>", "Filter or configure one rig")
+    .option("--enable", "Enable exclusive free reserve accounts for this rig")
+    .option("--disable", "Disable automatic rotation for this rig")
+    .option("--json", "Output as parseable JSON")
+    .action(async (opts: { rig?: string; enable?: boolean; disable?: boolean; json?: boolean }) => {
+      if ((opts.enable && opts.disable) || ((opts.enable || opts.disable) && !opts.rig)) {
+        console.error("Select --rig and exactly one of --enable/--disable."); process.exitCode = 1; return;
+      }
+      const client = await getClient(getDeps()); if (!client) { process.exitCode = 1; return; }
+      const res = opts.enable || opts.disable
+        ? await client.post("/api/provider/rotation", { rig: opts.rig, enabled: !!opts.enable })
+        : await client.get(`/api/provider/rotation${opts.rig ? `?rig=${encodeURIComponent(opts.rig)}` : ""}`);
+      if (handleHttpError(res, "rotation")) return;
+      console.log(JSON.stringify(res.data, null, opts.json ? undefined : 2));
+    });
+  cmd.command("register")
+    .description("Create an isolated account home and print its native login command")
+    .requiredOption("--account <ref>", "New codex-* or claude-* account reference")
+    .option("--json", "Output as parseable JSON")
+    .action(async (opts: { account: string; json?: boolean }) => {
+      const client = await getClient(getDeps()); if (!client) { process.exitCode = 1; return; }
+      const res = await client.post<{ account: string; home: string; loginCommand: string }>("/api/provider/register", { account: opts.account });
+      if (handleHttpError(res, "register")) return;
+      console.log(opts.json ? JSON.stringify(res.data) : res.data.loginCommand);
+    });
   return cmd;
 }

@@ -959,6 +959,39 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
   // same endpoint. Resolution returns to the PARKED OWNER (blocked →
   // in-progress on the SAME item) — never a closure, never a new owner.
   cmd
+    .command("answer <qitemId>")
+    .description("Record a native human answer and complete the decision when all questions are answered")
+    .option("--question <id>", "Question ID")
+    .option("--option <id>", "Option ID")
+    .option("--decision <text>", "Free-text decision")
+    .option("--decision-file <path>", "JSON decision request (requestId, expectedRevision, answers or decision)")
+    .option("--request-id <id>", "Stable retry ID")
+    .option("--expected-revision <number>", "Revision displayed to the human")
+    .option("--bearer <token>", "Operator or scoped bridge credential; prefer OPENRIG_AUTH_BEARER_TOKEN")
+    .option("--json", "JSON output")
+    .action(async (qitemId: string, opts: { question?: string; option?: string; decision?: string; decisionFile?: string; requestId?: string; expectedRevision?: string; bearer?: string; json?: boolean }) => {
+      const deps = getDeps();
+      let body: Record<string, unknown>;
+      try {
+        if (opts.decisionFile && [opts.question, opts.option, opts.decision, opts.requestId, opts.expectedRevision].some(x => x !== undefined)) throw new Error("--decision-file cannot be combined with inline decision fields");
+        if (!!opts.question !== !!opts.option) throw new Error("--question and --option must be supplied together");
+        if (opts.question && opts.decision !== undefined) throw new Error("Use option IDs or free-text decision, not both");
+        body = opts.decisionFile ? JSON.parse(await resolveQueueBody({ bodyFile: opts.decisionFile })) : {
+          requestId: opts.requestId, expectedRevision: Number(opts.expectedRevision),
+          ...(opts.question ? { answers: { [opts.question]: opts.option } } : {}), ...(opts.decision ? { decision: opts.decision } : {}),
+        };
+        if (!body || typeof body !== "object" || Array.isArray(body) || !body.requestId || !Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 1) throw new Error("requestId and a positive expectedRevision are required");
+      } catch (e) { console.error((e as Error).message); process.exitCode = 1; return; }
+      const bearer = opts.bearer ?? process.env.OPENRIG_AUTH_BEARER_TOKEN;
+      await withClient(deps, async client => {
+        const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/answer`, body,
+          bearer ? { headers: { Authorization: `Bearer ${bearer}` } } : undefined);
+        if (res.status >= 400) process.exitCode = 1;
+        console.log(JSON.stringify(res.data, null, opts.json ? undefined : 2));
+      });
+    });
+
+  cmd
     .command("resolve <qitemId>")
     .description("Resolve a leg-1 parked qitem (state=blocked on a human seat): records the decision text durably in queue_transitions, unparks blocked -> in-progress, and nudges the owner. Non-closure.")
     .requiredOption("--decision <text>", "The human's decision text (non-empty; lands in transition_note + the audit row)")

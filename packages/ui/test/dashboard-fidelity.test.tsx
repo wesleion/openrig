@@ -108,7 +108,7 @@ describe("Dashboard route visual refresh (OPR.0.4.1.14)", () => {
     // (3 rigs, 23 agents from the mocked hooks); the active sub-count is dropped.
     expect(text).toContain("RIGS");
     expect(text).toContain("03");
-    expect(text).toContain("AGENTS");
+    expect(text).toContain("MEMBERS");
     expect(text).toContain("23");
     expect(text).not.toContain("03 / 23"); // old combined RIGS / AGENTS row is gone
     // OPERATOR ID stays wired to the configured operator_session (real source).
