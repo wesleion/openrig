@@ -20,7 +20,26 @@ export interface NativeProcessRow {
 
 export type NativeRuntime = "claude-code" | "codex";
 
+function settingsJsonEnd(command: string, start: number): number | null {
+  let depth = 0; let quote = false; let escaped = false;
+  for (let i = start; i < command.length; i += 1) {
+    const c = command[i]!;
+    if (quote) { if (escaped) escaped = false; else if (c === "\\\\") escaped = true; else if (c === '"') quote = false; continue; }
+    if (c === '"') quote = true;
+    else if (c === "{" || c === "[") depth += 1;
+    else if (c === "}" || c === "]") { depth -= 1; if (depth === 0) return i + 1; if (depth < 0) return null; }
+  }
+  return null;
+}
+
 function tokens(command: string): string[] {
+  // Reject malformed inline settings before tokenization can expose a resume token inside them.
+  for (const match of command.matchAll(/(?:^|\s)--settings(?:=|\s+)(?=\{)/g)) {
+    const start = (match.index ?? 0) + match[0].length;
+    const end = settingsJsonEnd(command, start);
+    if (end === null) return [];
+    try { JSON.parse(command.slice(start, end)); } catch { return []; }
+  }
   // ps flattens argv: inline settings JSON retains its string delimiters.
   // A quote inside a name or filename is literal, not a shell span delimiter.
   const result: string[] = [];

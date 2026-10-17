@@ -147,6 +147,8 @@ migrationsForFullTestDb.push(controllerTelemetryCompactionSchema, sessionRenewal
 
 export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "096_human_bridge.sql": "Scoped human bridge events, decisions and receipts require the full modern queue schema; native bridge suites migrate ALL_MIGRATIONS. This fixture is the legacy core edge and never configures a bridge.",
+  "099_provider_accounts.sql": "provider-account subsystem tables; provider suites migrate ALL_MIGRATIONS.",
+  "100_provider_account_repairs.sql": "provider-account repair migration; provider suites migrate ALL_MIGRATIONS.",
   "082_archive_identity_provenance.sql": "archive extension; 054 is excluded from this core fixture. Archive identity regressions use ALL_MIGRATIONS.",
   "026_inbox_entries.sql": "inbox subsystem table — not on the shared core edge (inbox suites migrate it inline).",
   "027_outbox_entries.sql": "outbox subsystem table — not on the shared core edge (outbox suites migrate it inline).",

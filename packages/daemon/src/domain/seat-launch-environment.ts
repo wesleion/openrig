@@ -113,7 +113,7 @@ export class SeatLaunchEnvironment {
       ? [searchPath ? `PATH=${shellQuote(searchPath)}` : "", this.codexHome ? `CODEX_HOME=${shellQuote(this.codexHome)}` : ""].filter(Boolean)
       : [];
     const fallbackEnv = [...codexEnv, ...Object.entries(accountEnv).map(([k, v]) => `${k}=${shellQuote(v)}`)];
-    const fallback = fallbackEnv.length ? `env ${noBilling} ${fallbackEnv.join(" ")} ${command}` : command;
+    const fallback = fallbackEnv.length ? `env ${[noBilling, ...fallbackEnv].filter(Boolean).join(" ")} ${command}` : command;
     try {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
       const shell = path.basename(await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
@@ -155,7 +155,7 @@ export class SeatLaunchEnvironment {
         return accountEnv.OPENRIG_ACCOUNT_REF ? `(unset ${SUBSCRIPTION_BILLING_ENV.join(" ")}; ${launch})` : launch;
       }
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
-      return `/usr/bin/env ${noBilling} ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+      return `/usr/bin/env ${[noBilling, ...assignments].filter(Boolean).join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
     } catch {
       // This best-effort correction is not a new launch admission gate. Do not
       // include error details: transport errors may contain environment values.

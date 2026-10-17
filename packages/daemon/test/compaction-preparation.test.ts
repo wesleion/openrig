@@ -2,7 +2,7 @@ import {afterEach, expect, it, vi} from 'vitest';
 import {Hono} from 'hono';
 import {execFileSync} from 'node:child_process';
 import {compactionRoutes} from '../src/routes/compaction.js';
-import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
@@ -129,14 +129,15 @@ it('polls wait after delivered prep, ordinary real transport still circulates, e
  await f.transport.send(seat,'ordinary work');expect(f.writes).toContain('ordinary work');
  publish(f);await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
 });
-it('ignores old maps, wrong-attempt/occupant markers, partial final and staging writes',async()=>{
+// Upstream #965: OpenRig publishes a complete `.tmp` map itself (the agent never renames).
+it('ignores old maps and incomplete or wrong-attempt final and temp files',async()=>{
  const f=fixture();writeFileSync(join(f.home,'RESTORE-MAP-old.md'),'old');await f.e.maybeAutoCompact(input);
  const a=f.e.getPreparationState(seat)!;mkdirSync(dirname(a.mapPath),{recursive:true});
  for(const text of ['partial',a.marker.replace(a.attemptId,'wrong-attempt'),a.marker.replace(a.occupantGeneration!,'wrong-occupant')]){
-  writeFileSync(a.mapPath,text);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
+  writeFileSync(a.mapPath,text);writeFileSync(a.mapPath+'.tmp',text);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
  }
- writeFileSync(a.mapPath+'.tmp',`# map\n${a.marker}\n`);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
- renameSync(a.mapPath+'.tmp',a.mapPath);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
+ writeFileSync(a.mapPath+'.tmp',`# map\n${a.marker}\n`);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
+ expect(readFileSync(a.mapPath,'utf8')).toBe(`# map\n${a.marker}\n`);expect(existsSync(a.mapPath+'.tmp')).toBe(false);
 });
 for(const end of ['expiry','cancel','disable','replacement'])it(`${end} disarms; a late map cannot compact or start automatic prep again`,async()=>{
  const f=fixture();await f.e.maybeAutoCompact(input);

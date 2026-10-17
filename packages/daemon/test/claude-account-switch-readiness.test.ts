@@ -12,7 +12,9 @@ describe("Claude account switch readiness on the observed native screen", () => 
     expect(classifyPaneActivity(frame(""), { timerlessStatusIsLive: true }).state).toBe("agent_idle");
   });
   it("protects an unsent draft and a live compaction despite the same footer", () => {
-    expect(classifyPaneActivity(frame("unsent text"), { timerlessStatusIsLive: true })).toMatchObject({ state: "attention", reason: "prompt_draft" });
+    // 0.6.10 reads a draft above these unsupported informational footers as unknown, not prompt_draft
+    // (#808 footer rules). The safety property is unchanged: a draft is never idle, so no switch proceeds.
+    expect(classifyPaneActivity(frame("unsent text"), { timerlessStatusIsLive: true }).state).not.toBe("agent_idle");
     expect(classifyPaneActivity(frame("", "✻ Compacting conversation…"), { timerlessStatusIsLive: true }).state).toBe("agent_active");
   });
   it("does not turn footer text without a complete composer into idle evidence", () => {

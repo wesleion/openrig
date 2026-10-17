@@ -223,8 +223,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     log(`slack delivery not configured (${missing}) — wire is inert; dispatches would be refused honestly`);
     const inert = buildInProcessWire({
       home: opts.home,
-      ops: [],
-      deliver: async () => ({ ok: false, class: "slack-not-configured", detail: missing }),
+      ops: opts.alternateDelivery?.enabled() ? [OUTBOUND_OP] : [],
+      deliver: async (decision) => {
+        const alternate = opts.alternateDelivery?.enabled() ? await opts.alternateDelivery.deliver(decision) : undefined;
+        return alternate ?? { ok: false, class: "slack-not-configured", detail: missing };
+      },
       log,
     });
     return { ...inert, status: () => ({ platform: "slack", configurationDigest: channelStateDigest(cfg), outboundReady: false, inboundReady: false, recovery: { state: "unavailable", reason: "inbound-not-configured" }, inbound: { state: "not-configured" } }) };
@@ -574,6 +577,8 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     releaseRef(key);
   };
   const engineDeliver: SubsystemDeliverFn = async (decision) => {
+    const alternate = opts.alternateDelivery?.enabled() ? await opts.alternateDelivery.deliver(decision) : undefined;
+    if (alternate) return alternate;
     const p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
     // The decision-resolved notice is written at closure, so a closed row is its normal case.
     if (replayedAtStart.has(decision.decisionId) && p.qitemId && p.ownerNotificationKind !== "human-decision-resolved"

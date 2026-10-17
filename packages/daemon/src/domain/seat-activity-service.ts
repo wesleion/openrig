@@ -339,6 +339,7 @@ export class SeatActivityService {
       ...seat.arbitrated,
       activity: "unknown",
       needsInput: { count: 0, reason: null },
+      needsInputEvidence: null,
       decidedBy: null,
       seq: seat.arbitrated.seq + 1, // the swap IS a visible event
       changedAt: at,
@@ -620,23 +621,23 @@ export class SeatActivityService {
     const chrome = this.latestByRung(seat, "needs-input-chrome");
     const hooksEv = this.latestByRung(seat, "lifecycle-hooks");
     const selfEv = this.latestByRung(seat, "self-report");
-    const needsInput: NeedsInputShape =
-      chrome?.needsInput && this.rungTrust(seat, "needs-input-chrome") === "authoritative"
-        ? chrome.needsInput
-        : hooksEv?.needsInput && this.rungTrust(seat, "lifecycle-hooks") === "authoritative"
-          ? hooksEv.needsInput
-          : selfEv?.needsInput && this.rungTrust(seat, "self-report") === "authoritative"
-            ? selfEv.needsInput
-            : { count: 0, reason: null };
+    const decider =
+      chrome?.needsInput && this.rungTrust(seat, "needs-input-chrome") === "authoritative" ? chrome
+        : hooksEv?.needsInput && this.rungTrust(seat, "lifecycle-hooks") === "authoritative" ? hooksEv
+          : selfEv?.needsInput && this.rungTrust(seat, "self-report") === "authoritative" ? selfEv : null;
+    const needsInput: NeedsInputShape = decider?.needsInput ?? { count: 0, reason: null };
+    const needsInputEvidence = decider ? { rung: decider.rung, observedAt: decider.observedAt } : null;
 
     const activityChanged = nextActivity !== seat.arbitrated.activity;
     const changed = activityChanged
       || needsInput.count !== seat.arbitrated.needsInput.count
-      || needsInput.reason !== seat.arbitrated.needsInput.reason;
+      || needsInput.reason !== seat.arbitrated.needsInput.reason
+      || (needsInputEvidence?.rung ?? null) !== (seat.arbitrated.needsInputEvidence?.rung ?? null);
     seat.arbitrated = {
       ...seat.arbitrated,
       activity: nextActivity,
       needsInput,
+      needsInputEvidence,
       decidedBy,
       seq: changed ? seat.arbitrated.seq + 1 : seat.arbitrated.seq,
       changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,

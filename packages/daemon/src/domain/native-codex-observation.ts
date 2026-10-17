@@ -80,11 +80,13 @@ export interface CodexTokenCountEvent {
       total_token_usage?: CodexTokenUsageRaw;
       model_context_window?: number;
     };
+    rate_limits?: unknown;
   };
 }
 
 export interface NativeCodexObservation {
   tokenCount: CodexTokenCountEvent | null;
+  quotaOnlyAfterTokenCount: boolean;
   execution: NonNullable<ContextUsage["execution"]>;
   runtimeMetadata: NonNullable<ContextUsage["runtimeMetadata"]>;
 }
@@ -111,6 +113,7 @@ function tokenUsage(value: unknown): CodexTokenUsageRaw | undefined {
 export function readNativeCodexObservation(rolloutPath: string, maxBytes = 8_000_000): NativeCodexObservation {
   const result: NativeCodexObservation = {
     tokenCount: null,
+    quotaOnlyAfterTokenCount: false,
     execution: { startedAt: null, completedAt: null, lastModelResponseAt: null, source: "codex_rollout_jsonl" },
     runtimeMetadata: { model: null, effort: null, sampledAt: null, source: "codex_rollout_jsonl" },
   };
@@ -137,13 +140,22 @@ export function readNativeCodexObservation(rolloutPath: string, maxBytes = 8_000
           const at = timestamp(record.timestamp);
           const payload = record.payload;
           if (!payload) continue;
-          if (payload.type === "token_count" && !result.tokenCount && payload.info && typeof payload.info === "object") {
-            const info = payload.info;
-            result.tokenCount = { ...(at ? { timestamp: at } : {}), payload: { type: "token_count", info: {
-              last_token_usage: tokenUsage(info.last_token_usage), total_token_usage: tokenUsage(info.total_token_usage),
-              model_context_window: typeof info.model_context_window === "number" && Number.isFinite(info.model_context_window) ? info.model_context_window : undefined,
-            } } };
-            result.execution.lastModelResponseAt = at;
+          if (payload.type === "token_count") {
+            if ((payload.info === null || payload.info === undefined) && payload.rate_limits !== undefined) {
+              result.quotaOnlyAfterTokenCount = true;
+              continue;
+            }
+            if (result.tokenCount) continue;
+            if (!payload.info || typeof payload.info !== "object") {
+              result.tokenCount = { ...(at ? { timestamp: at } : {}), payload: { type: "token_count" } };
+            } else {
+              const info = payload.info;
+              result.tokenCount = { ...(at ? { timestamp: at } : {}), payload: { type: "token_count", info: {
+                last_token_usage: tokenUsage(info.last_token_usage), total_token_usage: tokenUsage(info.total_token_usage),
+                model_context_window: typeof info.model_context_window === "number" && Number.isFinite(info.model_context_window) ? info.model_context_window : undefined,
+              } } };
+              result.execution.lastModelResponseAt = at;
+            }
           }
           if (payload.type === "task_started" && !result.execution.startedAt && at) result.execution.startedAt = at;
           if (payload.type === "task_complete" && !result.execution.completedAt && at) result.execution.completedAt = at;

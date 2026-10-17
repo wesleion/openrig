@@ -66,12 +66,12 @@ process.stdin.on("end", () => {
       const rateLimits = normalizeRateLimits(raw.rate_limits);
       const providerUsage = {
         seatSession: raw.session_name || raw.session_id,
-        nativeSession: raw.session_id ?? null,
-        nodeId: process.env.OPENRIG_NODE_ID || null,
-        generation: process.env.OPENRIG_OCCUPANT_GENERATION || null,
-        accountRef: process.env.OPENRIG_ACCOUNT_REF || null,
-        accountHome: process.env.CLAUDE_CONFIG_DIR || null,
-        accountEpoch: process.env.OPENRIG_ACCOUNT_EPOCH || null,
+        ...(raw.session_id !== undefined ? { nativeSession: raw.session_id } : {}),
+        ...(process.env.OPENRIG_NODE_ID ? { nodeId: process.env.OPENRIG_NODE_ID } : {}),
+        ...(process.env.OPENRIG_OCCUPANT_GENERATION ? { generation: process.env.OPENRIG_OCCUPANT_GENERATION } : {}),
+        ...(process.env.OPENRIG_ACCOUNT_REF ? { accountRef: process.env.OPENRIG_ACCOUNT_REF } : {}),
+        ...(process.env.CLAUDE_CONFIG_DIR ? { accountHome: process.env.CLAUDE_CONFIG_DIR } : {}),
+        ...(process.env.OPENRIG_ACCOUNT_EPOCH ? { accountEpoch: process.env.OPENRIG_ACCOUNT_EPOCH } : {}),
         asOf: new Date().toISOString(),
         ...(rateLimits ? { accountKind: "subscription", rateLimits } : {}),
       };

@@ -97,7 +97,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }) {
     this.tmux = deps.tmux;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
-    this.fs = { ...deps.fsOps, inspectPath: deps.fsOps.inspectPath ?? ((target: string) => {
+    this.fs = deps.fsOps;
+    if (!this.fs.inspectPath) this.fs.inspectPath = (target: string) => {
       try {
         const stat = fs.lstatSync(target);
         return stat.isSymbolicLink() ? "symlink" : stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other";
@@ -105,7 +106,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return "missing";
         throw error;
       }
-    }) };
+    };
     this.sessionIdFactory = deps.sessionIdFactory ?? randomUUID;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
@@ -743,7 +744,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const statePaths: string[] = [];
     const failures: string[] = [];
     if (managed) {
-      if (cwd) statePaths.push(managed.configPaths(cwd, binding.tmuxSession ?? undefined).statePath);
+      if (cwd && typeof managed.configPaths === "function") statePaths.push(managed.configPaths(cwd, binding.tmuxSession ?? undefined).statePath);
     } else {
       if (home) statePaths.push(nodePath.join(home, ".claude.json"));
       // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
