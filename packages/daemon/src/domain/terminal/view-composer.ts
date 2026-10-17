@@ -44,6 +44,8 @@ export interface ViewMemberInput {
   seat: string;
   /** Runtime recorded for a live seat; absent for saved members without inventory data. */
   runtime?: string | null;
+  /** Trusted local registration; null command discloses an unavailable monitor. */
+  controller?: { kind: string; command: string | null };
   /** Pane label — `<agent> · <slice>` (AC-7). */
   label: string;
   /** The tmux session to attach to (may be null if the seat has no tmux binding). */
@@ -170,6 +172,16 @@ export function composeView(
       continue;
     }
 
+    // A local registered controller is observed without replacing its managed tmux shell.
+    if (m.controller) {
+      if (!m.controller.command) {
+        absent.push({ seat: m.seat, host: null, reason: "registered controller monitor unavailable" });
+      } else {
+        opened.push({ seat: m.seat, label: m.label, runtime: "terminal", controller: m.controller.kind,
+          paneCommand: m.controller.command, readOnly: true });
+      }
+      continue;
+    }
     // Local member.
     if (!m.tmuxSession) {
       absent.push({

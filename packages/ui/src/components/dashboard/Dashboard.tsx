@@ -188,7 +188,7 @@ function FieldEnvironment({
     { k: "STATION ID", v: station },
     { k: "OPERATOR ID", v: operatorId },
     { k: "RIGS", v: pad2(rigs) },
-    { k: "AGENTS", v: pad2(agents) },
+    { k: "MEMBERS", v: pad2(agents) },
     { k: "VERSION", v: version },
   ];
   return (

@@ -4,6 +4,9 @@
 // trap). Append new migrations to the END, in order.
 
 import { coreSchema } from "./migrations/001_core_schema.js";
+import { providerAccountsSchema } from "./migrations/099_provider_accounts.js";
+import { providerAccountRepairsSchema } from "./migrations/100_provider_account_repairs.js";
+import { controllerTelemetryCompactionSchema } from "./migrations/097_controller_telemetry_compaction.js";
 import { bindingsSessionsSchema } from "./migrations/002_bindings_sessions.js";
 import { eventsSchema } from "./migrations/003_events.js";
 import { snapshotsSchema } from "./migrations/004_snapshots.js";
@@ -100,6 +103,7 @@ import type { Migration } from "./migrate.js";
 
 import { rigNonInterruptiveSchema } from "./migrations/095_rig_non_interruptive.js";
 import { humanBridgeSchema } from "./migrations/096_human_bridge.js";
+import { sessionRenewalSchema } from "./migrations/098_session_renewal.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -199,4 +203,8 @@ export const ALL_MIGRATIONS: Migration[] = [
   usageSamplesLatestIndexesSchema,
   rigNonInterruptiveSchema,
   humanBridgeSchema,
+  controllerTelemetryCompactionSchema,
+  sessionRenewalSchema,
+  providerAccountsSchema,
+  providerAccountRepairsSchema,
 ];

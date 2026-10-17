@@ -49,11 +49,17 @@ interface HealthProjectionRead {
 }
 interface NodeInventoryRead {
   nodeId?: string;
+  rigId?: string;
   logicalId: string;
   podNamespace?: string | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   model?: string | null;
+  effort?: string | null;
+  controller?: AgentRow["controller"];
+  runtimeMetadata?: AgentRow["runtimeMetadata"];
+  activityStateChangedAt?: string | null;
+  activityStartedAt?: string | null;
   lifecycleState: string;
   sessionStatus?: string | null;
   startupStatus?: string | null;
@@ -73,6 +79,8 @@ interface NodeInventoryRead {
     display?: string;
     needsInput?: { count?: number; reason?: string | null } | null;
     decidedBy?: string | null;
+    changedAt?: string | null;
+    activityStartedAt?: string | null;
   } | null;
   identityVerdict?: { verdict?: string } | null;
   canonicalSessionName: string | null;
@@ -82,13 +90,7 @@ interface NodeInventoryRead {
   profile?: string | null;
   resolvedSpecVersion?: string | null;
   resolvedSpecHash?: string | null;
-  contextUsage?: {
-    availability: "known" | "unknown";
-    usedPercentage: number | null;
-    contextWindowSize: number | null;
-    totalInputTokens: number | null;
-    totalOutputTokens: number | null;
-  };
+  contextUsage?: AgentRow["contextUsage"];
   hasAssignedWork?: boolean;
   assignedWorkCount?: number;
   pendingWorkCount?: number;
@@ -217,17 +219,25 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     || node.identityVerdict?.verdict === "pane_missing";
   return {
     nodeId: node.nodeId,
+    rigId: node.rigId,
+    nodeKind: node.nodeKind,
     name: node.logicalId,
     runtime: node.runtime ?? "unknown",
-    model: node.model ?? null,
+    model: node.runtimeMetadata?.model ?? node.controller?.model ?? node.model ?? null,
+    effort: node.runtimeMetadata?.effort ?? node.effort ?? null,
+    controller: node.controller,
+    runtimeMetadata: node.runtimeMetadata,
+    contextUsage: ctx,
+    activityStateChangedAt: node.activityStateChangedAt ?? node.activityState?.changedAt ?? null,
+    activityStartedAt: node.activityStartedAt ?? node.activityState?.activityStartedAt ?? null,
     spec: node.resolvedSpecName ?? "",
     profile: node.profile ?? null,
     specVersion: node.resolvedSpecVersion ?? null,
     specHash: node.resolvedSpecHash ?? null,
     // honest-unknown: no value in the projection → null → renders "—"
     context: known && ctx.usedPercentage != null ? Math.round(ctx.usedPercentage) : null,
-    tokens: known ? fmtTokens(ctx.totalInputTokens, ctx.totalOutputTokens) : null,
-    contextWindowSize: known ? ctx.contextWindowSize : null,
+    tokens: known ? fmtTokens(ctx.totalInputTokens ?? null, ctx.totalOutputTokens ?? null) : null,
+    contextWindowSize: known ? ctx.contextWindowSize ?? null : null,
     totalInputTokens: known ? ctx.totalInputTokens : null,
     totalOutputTokens: known ? ctx.totalOutputTokens : null,
     hasAssignedWork: node.hasAssignedWork,
@@ -281,7 +291,6 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
 function groupPods(nodes: NodeInventoryRead[]): PodNode[] {
   const pods = new Map<string, AgentRow[]>();
   for (const node of nodes) {
-    if (node.nodeKind !== "agent") continue;
     const pod = node.podNamespace ?? "(no pod)";
     const list = pods.get(pod) ?? [];
     list.push(toAgentRow(node));
@@ -640,7 +649,7 @@ export async function hydrateSnapshot(
         resolvedSourcePath: entry.resolvedSourcePath,
         sourceType: entry.sourceType,
         relativePath: entry.relativePath,
-        consumers: readingOnly ? undefined : entry.kind === "rig" ? rigConsumers.get(entry.name) ?? [] : entry.kind === "agent" ? localHost.rigs.flatMap((rig) => rig.pods.flatMap((pod) => pod.agents.filter((agent) => agent.spec === entry.name).map((agent) => ({ rig: rig.name, host: localHost.name, agent: agent.name, runtime: agent.runtime, model: agent.model, status: agent.status })))) : undefined,
+        consumers: readingOnly ? undefined : entry.kind === "rig" ? rigConsumers.get(entry.name) ?? [] : entry.kind === "agent" ? localHost.rigs.flatMap((rig) => rig.pods.flatMap((pod) => pod.agents.filter((agent) => agent.nodeKind !== "infrastructure" && agent.spec === entry.name).map((agent) => ({ rig: rig.name, host: localHost.name, agent: agent.name, runtime: agent.runtime, model: agent.model, status: agent.status })))) : undefined,
       };
       const detail = reviewed.get(entry.id);
       const sourceUnavailable = readErrors.find((error) => error.startsWith(`spec-review(${entry.name}):`)) ?? "source review unavailable";

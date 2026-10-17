@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type ComponentProps } from "react";
 import { Handle, Position } from "@xyflow/react";
 import { displayAgentName, inferPodName } from "../../lib/display-name.js";
 import {
@@ -21,6 +21,7 @@ import { formatRuntimeModel } from "../../lib/runtime-brand.js";
 import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
 import { useSelectedHostId } from "../../hooks/useHosts.js";
 import { LOCAL_HOST_ID } from "../../lib/host-param.js";
+import { ControllerModeControl, RuntimeMetricsDetails, type ControllerView, type NativeContextView } from "../ControllerControls.js";
 
 interface HybridPodGroupNodeData {
   podDisplayName?: string | null;
@@ -32,9 +33,15 @@ interface HybridPodGroupNodeData {
 
 interface HybridAgentNodeData {
   logicalId: string;
+  nodeId?: string;
   role?: string | null;
   runtime?: string | null;
   model?: string | null;
+  effort?: string | null;
+  controller?: ControllerView | null;
+  contextUsage?: NativeContextView | null;
+  activityState?: ComponentProps<typeof RuntimeMetricsDetails>["activityState"];
+  runtimeMetadata?: { model?: string | null; effort?: string | null; effortDefault?: string | null; sampledAt?: string | null; source?: string | null } | null;
   status?: string | null;
   nodeKind?: "agent" | "infrastructure";
   startupStatus?: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -129,7 +136,17 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
   const activityStale = isActivityStale(data.agentActivity);
   const timeInState = getTimeInState(data.agentActivity);
   const activityCard = getActivityCardSignal({ activityRing: data.activityRing, activityState });
-  const runtimeTitle = data.runtime || data.model ? formatRuntimeModel(data.runtime, data.model) : null;
+  const model = data.runtimeMetadata?.model ?? data.controller?.model ?? data.model;
+  const nativeEffort = data.runtimeMetadata?.effort ?? data.effort;
+  const effort = isInfra ? "N/A" : nativeEffort === "default" ? data.runtimeMetadata?.effortDefault ? `${data.runtimeMetadata.effortDefault}, padrão` : "padrão" : nativeEffort ?? "—";
+  const modelTitle = data.runtimeMetadata?.model
+    ? `Modelo observado · ${data.runtimeMetadata.source ?? "runtime"}${data.runtimeMetadata.sampledAt ? ` · ${data.runtimeMetadata.sampledAt}` : ""}`
+    : data.controller?.model ? "Modelo do controlador" : "Modelo declarado; execução não observada";
+  const effortTitle = isInfra ? "Esforço não se aplica à infraestrutura"
+    : nativeEffort === "default" ? "Padrão do catálogo nativo; nível efetivo não registrado pela sessão"
+    : data.runtimeMetadata?.effort ? `Esforço observado · ${data.runtimeMetadata.source ?? "runtime"}`
+      : data.effort ? "Esforço declarado; execução não observada" : "Esforço indisponível";
+  const runtimeTitle = data.runtime || model ? formatRuntimeModel(data.runtime, model) : null;
   const contextKnown = data.contextAvailability === "known" && typeof data.contextUsedPercentage === "number";
   const tokenTotal = sumTokenCounts(data.contextTotalInputTokens, data.contextTotalOutputTokens);
   const tokenLabel = formatCompactTokenCount(tokenTotal);
@@ -253,12 +270,11 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
         <div className="truncate font-mono text-[8px] leading-tight text-on-surface-variant">
           {data.canonicalSessionName ?? data.logicalId}
         </div>
-        <div className="min-w-0">
+        <div className="min-w-0" title={modelTitle}>
           <RuntimeBadge
             runtime={data.runtime}
-            model={data.model}
+            model={model}
             size="xs"
-            compact
             variant="inline"
             className="max-w-full"
           />
@@ -268,6 +284,12 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
             </span>
           ) : null}
         </div>
+        <div className="truncate font-mono text-[8px] text-on-surface-variant" title={effortTitle} data-testid="hybrid-effort-badge">
+          esforço {effort}
+        </div>
+        {data.controller ? (
+          <ControllerModeControl rigId={data.rigId ?? undefined} nodeId={data.nodeId} controller={data.controller} readOnly={nodeIsRemote} />
+        ) : null}
         <div className="flex items-end justify-between gap-2 pt-0.5">
           <div
             className={cn("font-mono text-[14px] font-bold leading-none", contextClass(data.contextUsedPercentage, data.contextFresh))}
@@ -286,6 +308,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
             {tokenLabel ?? "--"}
           </div>
         </div>
+        <RuntimeMetricsDetails contextUsage={data.contextUsage} activityState={data.activityState} />
       </div>
       <Handle type="source" position={Position.Right} className="opacity-0" />
     </div>
@@ -323,9 +346,15 @@ export const HybridAgentNode = memo(HybridAgentNodeInner, (prev, next) => {
   const b = next.data;
   return (
     a.logicalId === b.logicalId &&
+    a.nodeId === b.nodeId &&
     a.role === b.role &&
     a.runtime === b.runtime &&
     a.model === b.model &&
+    a.effort === b.effort &&
+    a.controller === b.controller &&
+    a.contextUsage === b.contextUsage &&
+    a.activityState === b.activityState &&
+    a.runtimeMetadata === b.runtimeMetadata &&
     a.status === b.status &&
     a.nodeKind === b.nodeKind &&
     a.startupStatus === b.startupStatus &&
@@ -338,6 +367,8 @@ export const HybridAgentNode = memo(HybridAgentNodeInner, (prev, next) => {
     a.contextTotalInputTokens === b.contextTotalInputTokens &&
     a.contextTotalOutputTokens === b.contextTotalOutputTokens &&
     a.agentActivity === b.agentActivity &&
+    a.terminalActive === b.terminalActive &&
+    a.identityVerdict === b.identityVerdict &&
     (a.currentQitems?.length ?? 0) === (b.currentQitems?.length ?? 0) &&
     a.rigId === b.rigId &&
     a.activityRing?.state === b.activityRing?.state &&

@@ -10,17 +10,25 @@ import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
 import {ContextMonitor} from '../src/domain/context-monitor.js';
+import {claudeCompactionPane} from './helpers/managed-compaction-pane.js';
+import {createDb} from '../src/db/connection.js';
+import {migrate} from '../src/db/migrate.js';
+import {ALL_MIGRATIONS} from '../src/db/all-migrations.js';
+import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 const seat='writer@demo', input={sessionName:seat,runtime:'claude-code',usedPercentage:90};
+const canonicalSkill=fileURLToPath(new URL('../assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md',import.meta.url));
 const homes:string[]=[];
-afterEach(()=>{vi.restoreAllMocks();for(const h of homes.splice(0))rmSync(h,{recursive:true,force:true});});
-function fixture(manualPrepWaitMs=1000){
+const databases:ReturnType<typeof createDb>[]=[];
+afterEach(()=>{vi.restoreAllMocks();for(const db of databases.splice(0))db.close();for(const h of homes.splice(0))rmSync(h,{recursive:true,force:true});});
+function fixture(manualPrepWaitMs=1000,persistent=false){
  const home=mkdtempSync(join(tmpdir(),'compaction-preparation-'));homes.push(home);
- let clock=10000,generation='generation-one',activity='idle';
+ let clock=10000,generation='generation-one',activity='idle',staged='';
  let onSleep:(()=>Promise<void>)|undefined;
  const db={prepare:()=>({get:()=>undefined,all:()=>[]})} as any;
  const writes:string[]=[],keys:string[][]=[];
  const policy={enabled:true,thresholdPercent:80,preCompactInstruction:'Write a restore map.',compactInstruction:'',messageInline:'',messageFilePath:'',postRestoreAuditInstruction:''};
- const tmux={probeSession:vi.fn(async()=>({state:'present'})),sendText:vi.fn(async(_:string,text:string)=>{writes.push(text);return{ok:true};}),sendKeys:vi.fn(async(_:string,k:string[])=>{keys.push(k);return{ok:true};})};
+ const tmux={probeSession:vi.fn(async()=>({state:'present'})),capturePaneContent:vi.fn(async()=>claudeCompactionPane(activity,staged)),sendText:vi.fn(async(_:string,text:string,beforeInput?:()=>void|Promise<void>)=>{await beforeInput?.();staged=text;writes.push(text);return{ok:true};}),sendKeys:vi.fn(async(_:string,k:string[],beforeInput?:()=>void|Promise<void>)=>{await beforeInput?.();keys.push(k);staged='';return{ok:true};})};
  const guard=new SeatDeliveryGuard(db,()=>({nodeId:'node-one',session:seat,pane:'%1',occupant:generation}));
  Object.assign(tmux,{deliveryGuard:guard});
  const transport=new SessionTransport({db,rigRepo:{} as any,sessionRegistry:{} as any,tmuxAdapter:tmux as any,sleep:async(ms)=>{clock+=ms;},now:()=>new Date(clock),waitForIdlePollMs:5});
@@ -29,14 +37,91 @@ function fixture(manualPrepWaitMs=1000){
  (transport as any).classifySendReadiness=async()=>({state:activity,reason:'fixture',evidenceSource:'fixture'});
  (transport as any).diagnoseProducerLink=async()=> 'fixture';
  const settings={resolveClaudeCompactionPolicy:()=>policy};
- const e=new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,manualPrepWaitMs,now:()=>clock,sleep:async(ms)=>{clock+=ms;await onSleep?.();},resolveOccupantGeneration:()=>generation});
- return{e,transport,tmux,guard,settings,onSleep:(fn:()=>Promise<void>)=>{onSleep=fn;},writes,keys,policy,home,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;},activity:(s:string)=>{activity=s;}};
+ const durableDb=persistent?createDb():undefined;if(durableDb){databases.push(durableDb);migrate(durableDb,ALL_MIGRATIONS);}
+ const restart=()=>new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,manualPrepWaitMs,now:()=>clock,sleep:async(ms)=>{clock+=ms;await onSleep?.();},resolveOccupantGeneration:()=>generation,db:durableDb,restoreSkillPath:canonicalSkill});
+ const e=restart();
+ return{e,restart,durableDb,transport,tmux,guard,settings,onSleep:(fn:()=>Promise<void>)=>{onSleep=fn;},writes,keys,policy,home,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;},activity:(s:string)=>{activity=s;}};
 }
 function publish(f:ReturnType<typeof fixture>,suffix=''){
  const a=f.e.getPreparationState(seat)!;mkdirSync(dirname(a.mapPath),{recursive:true});
  writeFileSync(a.mapPath+'.tmp',`# Restore map\nCurrent work and next step.\n${a.marker}${suffix}\n`);renameSync(a.mapPath+'.tmp',a.mapPath);
 }
 const compacts=(f:ReturnType<typeof fixture>)=>f.writes.filter(t=>t.startsWith('/compact'));
+for(const projection of ['missing','unowned','modified','owned','symlink'])it(`prep and restore read ${projection==='owned'?'native':'shipped'} instructions for ${projection} native skill`,async()=>{
+ const f=fixture(),cwd=join(f.home,'workspace');mkdirSync(cwd);
+ const relative=join('.claude','skills','claude-compaction-restore','SKILL.md'),native=join(cwd,relative);
+ const source=readFileSync(canonicalSkill,'utf8');
+ if(projection!=='missing'){
+  mkdirSync(dirname(native),{recursive:true});writeFileSync(native,projection==='modified'?'User-modified native skill.':source);
+  if(['modified','owned','symlink'].includes(projection)){
+   const owner=join(cwd,'.openrig','hooks','compaction-assets.json');mkdirSync(dirname(owner),{recursive:true});
+   writeFileSync(owner,JSON.stringify({version:1,files:{[relative]:{sha256:createHash('sha256').update(source).digest('hex')}}}));
+  }
+  if(projection==='symlink'){
+   const outside=join(f.home,'private-skill.md');writeFileSync(outside,source);rmSync(native);symlinkSync(outside,native);
+  }
+ }
+ f.policy.preCompactInstruction='Keep my custom pre-compaction checklist.';f.policy.messageInline='Keep my custom post-compaction checklist.';
+ const scoped={...input,cwd};await f.e.maybeAutoCompact(scoped);publish(f);await f.e.maybeAutoCompact(scoped);
+ await f.e.maybeAutoCompact({...scoped,usedPercentage:20});await f.e.maybeAutoCompact({...scoped,usedPercentage:20});
+ const expected=JSON.stringify(projection==='owned'?native:canonicalSkill);
+ expect(f.writes[0]).toContain(`Read the canonical restore skill directly from ${expected}`);
+ expect(f.writes[0]).toContain('Keep my custom pre-compaction checklist.');
+ const restore=f.writes.find(text=>text.startsWith('Please respond to this normal user message'))!;
+ expect(restore).toContain(`Read the canonical restore skill directly from ${expected}`);
+ expect(restore).toContain('Keep my custom post-compaction checklist.');
+ if(projection==='modified')expect(readFileSync(native,'utf8')).toBe('User-modified native skill.');
+ if(projection==='symlink')expect(lstatSync(native).isSymbolicLink()).toBe(true);
+});
+for(const state of ['running','needs_input','unknown','plan'])it(`automatic preparation waits for fresh ${state} pane without creating an attempt`,async()=>{
+ const f=fixture();
+ if(state==='plan')f.tmux.capturePaneContent.mockResolvedValue(claudeCompactionPane('idle','',true));else f.activity(state);
+ for(let i=0;i<4;i++)expect(await f.e.maybeAutoCompact(input)).toMatchObject({triggered:false,reason:'managed_compaction_deferred'});
+ expect(f.e.getPreparationState(seat)).toBeNull();expect(f.writes).toEqual([]);expect(f.keys).toEqual([]);
+});
+it('ready map remains the same attempt while working, then compact submits once after idle',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);publish(f);const original=f.e.getPreparationState(seat)!;
+ f.activity('running');for(let i=0;i<4;i++)await f.e.maybeAutoCompact(input);
+ expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:original.attemptId,deadlineAt:original.deadlineAt,status:'waiting'});
+ expect(f.writes).toHaveLength(1);f.activity('idle');await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
+ expect(compacts(f)).toHaveLength(1);
+});
+it('fresh busy observation after outer readiness but before actual paste keeps the ready map',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);publish(f);const id=f.e.getPreparationState(seat)!.attemptId;
+ const original=f.tmux.sendText.getMockImplementation()!;
+ f.tmux.sendText.mockImplementationOnce(async(...args)=>{f.activity('running');return original(...args);});
+ await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
+ expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:id,status:'waiting',reason:'managed_compaction_deferred'});
+ f.activity('idle');await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
+});
+it('a human turn after compact paste prevents Enter and permanently disarms automatic replay',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);publish(f);const enters=f.keys.length;
+ const original=f.tmux.sendText.getMockImplementation()!;
+ f.tmux.sendText.mockImplementationOnce(async(...args)=>{const result=await original(...args);f.activity('running');return result;});
+ await f.e.maybeAutoCompact(input);expect(f.keys).toHaveLength(enters);
+ expect(f.e.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'uncertain',reason:'delivery_uncertain'});
+ f.activity('idle');for(let i=0;i<3;i++)await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
+});
+it('durable restart reuses delivered unexpired preparation for the same occupant',async()=>{
+ const f=fixture(1000,true);await f.e.maybeAutoCompact(input);publish(f);const before=f.e.getPreparationState(seat)!;
+ const resumed=f.restart();expect(resumed.getPreparationState(seat)).toMatchObject({attemptId:before.attemptId,deadlineAt:before.deadlineAt,status:'waiting'});
+ await resumed.maybeAutoCompact(input);expect(f.writes.filter(t=>!t.startsWith('/compact'))).toHaveLength(1);expect(compacts(f)).toHaveLength(1);
+ expect(resumed.getPreparationHistory(seat)[0]).toMatchObject({attemptId:before.attemptId,status:'compact-sent',inFlight:null});
+});
+for(const invalid of ['expiry','occupant'])it(`durable restart disarms preparation after ${invalid}`,async()=>{
+ const f=fixture(1000,true);await f.e.maybeAutoCompact(input);publish(f);
+ if(invalid==='expiry')f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);else f.generation('new-occupant');
+ const resumed=f.restart();expect(resumed.getPreparationState(seat)).toMatchObject({status:'stopped',reason:invalid==='expiry'?'preparation_incomplete':'stale_generation'});
+ await resumed.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
+ expect(resumed.getPreparationHistory(seat)[0].reason).toBe(invalid==='expiry'?'preparation_incomplete':'stale_generation');
+});
+for(const kind of ['prep','compact'])it(`durable restart with interrupted ${kind} write never resends`,async()=>{
+ const f=fixture(1000,true);await f.e.maybeAutoCompact(input);const saved=f.durableDb!.prepare('SELECT state_json FROM compaction_preparations').get() as {state_json:string};
+ const state=JSON.parse(saved.state_json);state.inFlight=kind;
+ f.durableDb!.prepare('UPDATE compaction_preparations SET state_json=?').run(JSON.stringify(state));
+ const resumed=f.restart();expect(resumed.getPreparationState(seat)).toMatchObject({status:'stopped',delivery:'uncertain',reason:'delivery_uncertain'});
+ for(let i=0;i<4;i++)await resumed.maybeAutoCompact(input);expect(f.writes).toHaveLength(1);expect(f.keys).toHaveLength(1);
+});
 it('polls wait after delivered prep, ordinary real transport still circulates, exact map releases once',async()=>{
  const f=fixture();expect(AUTO_PREP_WAIT_MS_DEFAULT).toBe(25*60_000);
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
@@ -123,12 +208,13 @@ for(const mapBeforeRise of [true,false])it(`threshold dip retains the same attem
 });
 for(const boundary of ['writeFile','load-buffer','key-list'])it(`actual tmux adapter checks cancellation after ${boundary} await`,async()=>{
  const f=fixture();await f.e.maybeAutoCompact(input);publish(f);
- const commands:string[][]=[];let pasted=false,unlinked=false;
+ const commands:string[][]=[];let pasted=false,unlinked=false,payload='';
  const adapter=new TmuxAdapter(async()=>{throw new Error('unexpected shell execution');},{
-  writeFile:async()=>{if(boundary==='writeFile')f.e.cancelPreparation(seat);},
+  writeFile:async(_path,text)=>{payload=text;if(boundary==='writeFile')f.e.cancelPreparation(seat);},
   unlink:async()=>{unlinked=true;},tmpName:()=>'/tmp/injected-payload',bufferName:()=> 'injected-buffer',
  },async argv=>{
   commands.push(argv);
+  if(argv[1]==='capture-pane')return claudeCompactionPane('idle',pasted?payload:'');
   if(argv[1]==='list-panes'){
    if(pasted && boundary==='key-list')f.e.cancelPreparation(seat);
    return '%1|0|/tmp|80|24|1';

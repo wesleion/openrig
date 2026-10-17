@@ -3,9 +3,35 @@
 // projection); FleetSnapshot is the render-side shape those reads hydrate —
 // it introduces no new data model.
 
+export interface NativeContextView {
+  availability: string; reason?: string | null; source?: string | null;
+  usedPercentage: number | null; contextWindowSize?: number | null;
+  totalInputTokens?: number | null; totalOutputTokens?: number | null;
+  sampledAt?: string | null; fresh?: boolean;
+  lastInference?: { inputTokens: number | null; outputTokens: number | null; cachedInputTokens: number | null; totalTokens: number | null; at: string | null };
+  totalCachedInputTokens?: number | null;
+  execution?: { startedAt: string | null; completedAt: string | null; lastModelResponseAt: string | null; source: string | null };
+  runtimeMetadata?: RuntimeMetadataView;
+}
+export interface RuntimeMetadataView { model: string | null; effort: string | null; source: string | null; sampledAt: string | null; effortDefault?: string | null; effortDefaultSampledAt?: string | null }
+export interface ControllerView {
+  kind: "jev-flow"; config: string; available?: boolean;
+  mode?: "off" | "observe" | "apply"; revision?: number; changedAt?: string | null;
+  model?: string; modelApplyEnabled?: boolean; error?: string;
+  latest?: { status: string; createdAt: string; action: string | null; reason: string | null } | null;
+}
+
 export interface AgentRow {
   /** Stable daemon node identity used by canonical seat-scoped records. */
   nodeId?: string;
+  nodeKind?: "agent" | "infrastructure";
+  rigId?: string;
+  effort?: string | null;
+  controller?: ControllerView | null;
+  contextUsage?: NativeContextView;
+  runtimeMetadata?: RuntimeMetadataView;
+  activityStateChangedAt?: string | null;
+  activityStartedAt?: string | null;
   name: string;
   runtime: string;
   /** effective served model; separate from runtime, null when not served */
@@ -506,6 +532,7 @@ export type Action =
   | { type: "act"; act: "launch-spec" }
   | { type: "act"; act: "open-terminal"; view: string; expectedPlan?: string }
   | { type: "act"; act: "run"; rigId: string; agent: string }
+  | { type: "act"; act: "controller-mode"; rigId: string; nodeId: string; mode: "off" | "observe" | "apply"; expectedRevision?: number }
   | { type: "notice"; message: string };
 
 /** FR-12: the section set is ONE in-code registry — adding a section is a
@@ -646,6 +673,8 @@ export interface Screen {
   motionActive?: boolean;
   /** Command readiness pulse is independent of content loading/progress. */
   commandMotionActive?: boolean;
+  /** Local elapsed-time redraw; performs no daemon read. */
+  runtimeClockActive?: boolean;
 }
 
 export type InputEvent =

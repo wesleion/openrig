@@ -12,6 +12,7 @@ import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
+import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
@@ -139,6 +140,9 @@ function findCurrentClaudeQuestion(paneContent: string): string | null {
 // Claude can leave these noninteractive warnings BELOW the input box and mode bar.
 // Recognize the complete input block, never a warning or historical prompt alone.
 const CLAUDE_STATUS_WARNINGS = [
+  /^✔ Update installed · Restart to apply$/,
+  /^~\d+(?:\.\d+)?k? uncached · \/clear to start fresh$/,
+  /^new task\? \/clear to save \d+(?:\.\d+)?k? tokens$/,
   /^✘ Auto-update failed: no write permission to npm prefix · Run claude doctor$/,
   /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
   /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
@@ -150,8 +154,18 @@ const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass 
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
 const CLAUDE_LIVE_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S[^(]*(?:…|\.{3})\s+\((?:running [^()·]+ hook · )?(?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/;
+// The same live row before Claude shows its timer: glyph, text, a trailing ellipsis and nothing
+// after it, as in "✻ Compacting conversation…" during a compaction's first seconds. Completed rows
+// ("✻ Crunched for 2s") have no trailing ellipsis. Only callers that must not send into a busy
+// pane opt in (ClassifyPaneOptions.timerlessStatusIsLive); ordinary send readiness is unchanged.
+const CLAUDE_TIMERLESS_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S.*(?:…|\.{3})$/;
 
-function findClaudeComposer(paneContent: string) {
+export interface ClassifyPaneOptions {
+  /** Treat a timer-less live status row above the composer as work in progress. */
+  timerlessStatusIsLive?: boolean;
+}
+
+function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = {}) {
   // Preserve columns: a multiline draft may contain indented border/prompt text.
   // This classifier scans at most 20 physical lines; captures can be taller.
   // Exhausting the scan without reaching the status head is unknown, not idle.
@@ -184,7 +198,10 @@ function findClaudeComposer(paneContent: string) {
   for (let i = statusStart; i >= 0; i--) {
     if (!lines[i]!.startsWith(indent)) break;
     const line = lines[i]!.slice(indent.length);
-    if ([CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS].some((pattern) => pattern.test(line))) {
+    const livePatterns = options.timerlessStatusIsLive
+      ? [CLAUDE_LIVE_STATUS_PATTERN, CLAUDE_TIMERLESS_STATUS_PATTERN, ...MID_WORK_PATTERNS]
+      : [CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS];
+    if (livePatterns.some((pattern) => pattern.test(line))) {
       liveStatus = truncateEvidence(line);
       headSeen = true;
       break;
@@ -219,7 +236,7 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   return truncateEvidence(priorTrimmed);
 }
 
-export function classifyPaneActivity(paneContent: string): PaneActivityClassification {
+export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
     return { state: "unknown", reason: "empty_capture", evidence: null };
@@ -237,7 +254,7 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const claudeComposer = findClaudeComposer(paneContent);
+  const claudeComposer = findClaudeComposer(paneContent, options);
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
   // Keep draft handling and selectors without this dialog boundary unchanged.
@@ -268,7 +285,7 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
-  if (claudeComposer?.hasWarnings && claudeComposer.supportedWarningFooter && PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
+  if (claudeComposer?.framed && claudeComposer.modeFooter && PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
     return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(claudeComposer.text) };
   }
   if (claudeComposer?.liveStatus) {
@@ -295,7 +312,11 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
-  const midWorkEvidence = findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN]);
+  const midWorkEvidence = findPatternEvidence(recentLines, [
+    ...MID_WORK_PATTERNS,
+    CLAUDE_LIVE_STATUS_PATTERN,
+    ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
+  ]);
   if (idleStatusBarLine && (!idleStatusBarLine.includes("⏵⏵ accept edits") || !midWorkEvidence)) {
     return {
       state: "agent_idle",
@@ -358,6 +379,8 @@ export async function probeSessionActivity(input: {
   /** S01/S02 P2: optional read-only observer of the capture this probe already takes. */
   captureObserver?: CaptureObserverSink;
   binding?: Omit<ObservedBinding, "sessionName">;
+  /** See ClassifyPaneOptions.timerlessStatusIsLive. */
+  timerlessStatusIsLive?: boolean;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -470,7 +493,7 @@ export async function probeSessionActivity(input: {
   try {
     const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
-    const classification = classifyPaneActivity(paneContent ?? "");
+    const classification = classifyPaneActivity(paneContent ?? "", { timerlessStatusIsLive: input.timerlessStatusIsLive === true });
     return observeProbe(captureSlot(paneContent, capturedAt, captureSeq), {
       state: mapPaneState(classification.state),
       reason: classification.reason,
@@ -672,7 +695,9 @@ function promptAnswerStaged(pane: string | null, answer: string, runtime: string
 
 export interface SendOpts {
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
-  beforeWrite?: () => void;
+  beforeWrite?: () => void | Promise<void>;
+  /** Internal compaction lifecycle only; ordinary messages keep advisory busy semantics. */
+  managedCompaction?: boolean;
   /** Stable caller request ID, reused for readback after transport uncertainty. */
   deliveryId?: string;
   auditPointer?: string;
@@ -681,6 +706,11 @@ export interface SendOpts {
   verify?: boolean;
   force?: boolean;
   waitForIdleMs?: number;
+  /** Internal, with `waitForIdleMs`: decide idle from a live pane read only. A runtime hook can't
+   *  authorize the send (a hook saying the seat waits on a person still refuses). For a caller whose
+   *  latest hook may predate the state that matters, such as a post-compact drain whose newest hook
+   *  can be the Stop from before /compact. */
+  readinessFromPaneOnly?: boolean;
   // OPR.0.4.1.10 — interactive-prompt / permission guard.
   // `dangerouslyInteract` is the ONLY override of the prompt/permission guard (force does NOT bypass
   // it). It requires `reason` and writes an auditable `transport.prompt_override` record before the
@@ -1385,6 +1415,7 @@ export class SessionTransport {
         attachmentType: sessionMeta.attachmentType,
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
+        readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
       });
       waitEvidence = {
         activity: waitResult.activity,
@@ -1517,23 +1548,41 @@ export class SessionTransport {
 
     // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);
+    let managedGuardReason: string | undefined;
+    const guardedWrite = async (staged: boolean) => {
+      await opts?.beforeWrite?.();
+      if (opts?.managedCompaction) {
+        const readiness = await this.checkManagedCompactionReadiness(sessionName, staged ? text : undefined);
+        if (!readiness.ok) {
+          managedGuardReason = readiness.reason;
+          throw new DeliveryGuardError(readiness.reason, "Managed compaction deferred; target is not demonstrably idle.");
+        }
+      }
+      // Capture awaits cannot authorize an occupant or attempt that ended meanwhile.
+      await opts?.beforeWrite?.();
+    };
+    const beforePaste = opts?.managedCompaction ? () => guardedWrite(false) : opts?.beforeWrite;
+    const beforeSubmit = opts?.managedCompaction ? () => guardedWrite(true) : opts?.beforeWrite;
     const textResult = await this.runStage(
       "session_transport.send_text",
-      () => {
-        opts?.beforeWrite?.();
-        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, opts?.beforeWrite, { bracketed: false });
-        return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text);
+      async () => {
+        await beforePaste?.();
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false });
+        return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",
-    );
+    ).catch(error => {
+      if (!managedGuardReason) throw error;
+      return { ok: false as const, message: String(error) };
+    });
     if (!textResult.ok) {
       return observe({
         ok: false,
         sessionName,
-        reason: "send_failed",
+        reason: managedGuardReason ?? "send_failed",
         outcome: "failed",
         error: `Failed to send text to '${sessionName}': ${textResult.message}`,
-        ...(waitMode ? { sent: false, ...waitEvidence } : {}),
+        ...(waitMode || managedGuardReason ? { sent: false, ...waitEvidence } : {}),
       });
     }
 
@@ -1556,17 +1605,20 @@ export class SessionTransport {
     // 5. Submit (Enter)
     const submitResult = await this.runStage(
       "session_transport.submit",
-      () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]); },
+      async () => { await beforeSubmit?.(); return beforeSubmit ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], beforeSubmit) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]); },
       (result) => result.ok ? "ok" : "failed",
-    );
+    ).catch(error => {
+      if (!managedGuardReason) throw error;
+      return { ok: false as const, message: String(error) };
+    });
     if (!submitResult.ok) {
       return observe({
         ok: false,
         sessionName,
-        reason: "submit_failed",
+        reason: managedGuardReason ? "delivery_uncertain" : "submit_failed",
         outcome: "failed",
         error: `Text is visible in '${sessionName}' but was not submitted (Enter failed). The agent may need manual attention.`,
-        ...(waitMode ? { sent: true, ...waitEvidence } : {}),
+        ...(waitMode || opts?.managedCompaction ? { sent: true, ...waitEvidence } : {}),
       });
     }
 
@@ -1601,6 +1653,35 @@ export class SessionTransport {
     return observe({ ok: true, sessionName, ...interaction, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
   }
 
+  /** Fresh pane evidence for managed compaction; hooks alone never authorize input. */
+  async checkManagedCompactionReadiness(sessionName: string, expectedStagedText?: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    try {
+      const meta = this.getSessionMeta(sessionName);
+      if (meta.runtime !== "claude-code" || meta.attachmentType === "external_cli") return { ok: false, reason: "target_activity_unknown" };
+      const pane = await this.tmuxAdapter.capturePaneContent(sessionName, 200);
+      if (!pane) return { ok: false, reason: "target_activity_unknown" };
+      const composer = findClaudeComposer(pane);
+      const footer = composer?.bar ?? pane.split("\n").map(line => line.trim()).filter(Boolean).at(-1) ?? "";
+      if (/⏸\s*plan mode on\b/.test(footer)) return { ok: false, reason: "plan_mode_active" };
+      let classificationPane = pane;
+      if (expectedStagedText !== undefined) {
+        if (inspectStartupStagedText(pane, expectedStagedText) !== "staged" && !promptAnswerStaged(pane, expectedStagedText, "claude-code"))
+          return { ok: false, reason: "target_activity_unknown" };
+        // Remove only the exact verified composer body for activity classification.
+        const lines = pane.split("\n");
+        let start = -1;
+        for (let i = lines.length - 1; i >= 0; i--) if (lines[i]!.trimStart().startsWith("❯")) { start = i; break; }
+        const end = lines.findIndex((line, i) => i > start && /^[─═-]{10,}$/.test(line.trim()));
+        if (start < 0 || end < 0) return { ok: false, reason: "target_activity_unknown" };
+        lines.splice(start, end - start, "❯");
+        classificationPane = lines.join("\n");
+      }
+      const activity = classifyPaneActivity(classificationPane);
+      if (activity.state === "agent_idle") return { ok: true };
+      return { ok: false, reason: activity.state === "attention" ? "target_needs_input" : activity.state === "agent_active" ? "mid_work" : "target_activity_unknown" };
+    } catch { return { ok: false, reason: "target_activity_unknown" }; }
+  }
+
   private runStage<T>(
     site: string,
     fn: () => Promise<T>,
@@ -1625,6 +1706,7 @@ export class SessionTransport {
     timeoutMs: number;
     signal?: AbortSignal;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
@@ -1706,7 +1788,7 @@ export class SessionTransport {
   /** One readiness observation, raced against the time left before the wait's deadline. Null
    *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
   private async observeReadinessWithin(
-    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding },
+    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
     remainingMs: number,
   ): Promise<AgentActivity | null> {
     const observation = this.classifySendReadiness(input);
@@ -1769,16 +1851,30 @@ export class SessionTransport {
     runtime: string | null;
     attachmentType: string | null;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<AgentActivity> {
     const now = this.now();
     const hookActivity = this.agentActivityStore?.getLatestForNode({
       sessionName: input.sessionName,
       now,
     });
+    // Pane-only readiness never lets a hook authorise a send, but a fresh hook showing work or a
+    // waiting person still refuses one, as it does for every other send.
+    if (
+      input.readinessFromPaneOnly &&
+      hookActivity &&
+      hookActivity.evidenceSource === "runtime_hook" &&
+      hookActivity.stale !== true &&
+      this.hookFreshForSend(hookActivity, now) &&
+      (hookActivity.state === "running" || hookActivity.state === "needs_input")
+    ) {
+      return hookActivity;
+    }
     // Use the fresh runtime-hook as the authoritative signal ONLY within the tight send-readiness
     // window. Beyond it (but still inside the looser display freshness) the hook is too old to prove
     // "safe to send now" — fall through to the real-time capture-pane probe (also Codex's sole guard).
     if (
+      !input.readinessFromPaneOnly &&
       hookActivity &&
       hookActivity.evidenceSource === "runtime_hook" &&
       hookActivity.stale !== true
@@ -1825,6 +1921,8 @@ export class SessionTransport {
       now,
       captureObserver: this.captureObserver,
       binding: input.binding,
+      // Pane-only readiness must not send into a status row whose timer hasn't appeared yet.
+      timerlessStatusIsLive: input.readinessFromPaneOnly === true,
     });
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)

@@ -330,6 +330,7 @@ export async function startServer(port?: number) {
       if (!monitorsStarted) {
         monitorsStarted = true;
         contextMonitor.start();
+        deps.providerAccountManager?.start();
         // PL-004 Phase C: start watchdog scheduler. Joins the supervision
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
@@ -390,6 +391,7 @@ export async function startServer(port?: number) {
       }],
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
+      ["provider-accounts", () => deps.providerAccountManager?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
       ["seat-activity", () => deps.seatActivityService?.stop()],
       ["seat-structural-activity", () => deps.seatStructuralActivityService?.stop()],

@@ -21,7 +21,45 @@ export interface NativeProcessRow {
 export type NativeRuntime = "claude-code" | "codex";
 
 function tokens(command: string): string[] {
-  return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, "")) ?? [];
+  const matcher = /"[^"]*"|'[^']*'|\S+/g;
+  const result: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(command)) !== null) {
+    // ps joins argv without shell quoting. Inline settings JSON must remain
+    // one argument, including spaces/quotes inside permission descriptions.
+    const equals = match[0].startsWith("--settings={");
+    const start = equals ? match.index + "--settings=".length : match.index;
+    if ((equals || result.at(-1) === "--settings") && command[start] === "{") {
+      const end = settingsJsonEnd(command, start);
+      if (end === null) return []; // Malformed JSON is never positive identity.
+      result.push((equals ? "--settings=" : "") + command.slice(start, end));
+      matcher.lastIndex = end;
+    } else result.push(match[0].replace(/^['"]|['"]$/g, ""));
+  }
+  return result;
+}
+
+function settingsJsonEnd(command: string, start: number): number | null {
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = start; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === "{" || char === "[") depth += 1;
+    else if (char === "}" || char === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        try { JSON.parse(command.slice(start, index + 1)); return index + 1; }
+        catch { return null; }
+      }
+    }
+  }
+  return null;
 }
 
 function executableName(token: string): string {

@@ -142,6 +142,7 @@ export class RigExpansionService {
           members: pod.members.map((member) => ({
             id: member.id,
             runtime: member.runtime,
+            ...("controller" in member ? { controller: member.controller } : {}),
             ...(member.agentRef ? { agent_ref: member.agentRef } : {}),
             ...(member.profile ? { profile: member.profile } : {}),
             ...(member.codexConfigProfile ? { codex_config_profile: member.codexConfigProfile } : {}),

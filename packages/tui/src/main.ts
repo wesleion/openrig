@@ -183,7 +183,7 @@ async function run(): Promise<void> {
     // padded row and scroll the entire frame; restore normal wrapping after paint.
     process.stdout.write("\x1b[?7l\x1b[H" + stylizeLines(lastScreen, style).map((l) => "\x1b[2K" + l).join("\r\n") + "\x1b[?7h");
     if (motionTimer) clearTimeout(motionTimer);
-    motionTimer = lastScreen.motionActive || lastScreen.commandMotionActive ? setTimeout(draw, MOTION_FRAME_MS) : null;
+    motionTimer = lastScreen.motionActive || lastScreen.commandMotionActive ? setTimeout(draw, MOTION_FRAME_MS) : lastScreen.runtimeClockActive ? setTimeout(draw, 1000) : null;
   }
 
   // 5.2 crash-cart: probe the daemon-down verdict via the shipped `rig crash-cart --json` verb (its
@@ -409,6 +409,9 @@ async function run(): Promise<void> {
       } else if (action.act === "run") {
         const result = await client.launchNode(action.rigId, action.agent);
         view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
+      } else if (action.act === "controller-mode") {
+        const result = await client.setControllerMode(action.rigId, action.nodeId, action.mode, action.expectedRevision);
+        view.dispatch({ type: "notice", message: `Jev: ${result.mode ?? action.mode} · revisão ${result.revision ?? "?"}` });
       }
     } catch (err) {
       if (action.act === "open-terminal") view.dispatch({ type: "terminal-result", view: action.view, message: err instanceof Error ? err.message : String(err) });

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import BetterSqlite3, { type Database } from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -130,14 +130,159 @@ describe("ContextUsageStore", () => {
     expect(usage.usedPercentage).toBe(88);
     expect(usage.remainingPercentage).toBe(12);
     expect(usage.contextWindowSize).toBe(258400);
-    expect(usage.totalInputTokens).toBe(227139);
-    expect(usage.totalOutputTokens).toBe(611);
+    expect(usage.totalInputTokens).toBeNull();
+    expect(usage.totalOutputTokens).toBeNull();
+    expect(usage.lastInference).toMatchObject({ inputTokens: 227139, outputTokens: 611, totalTokens: 227750 });
     expect(usage.sessionId).toBe("thread-1");
     expect(usage.sessionName).toBe("dev-qa@test-rig");
     expect(usage.transcriptPath).toBe(rolloutPath);
     expect(usage.currentUsage).toContain("\"model_context_window\":258400");
 
     rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  it("keeps cumulative cache totals separate from last-context usage through both persistence projections", () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-metric-totals-"));
+    const rolloutPath = join(root, "rollout.jsonl");
+    const stateDb = new BetterSqlite3(join(root, "state_5.sqlite"));
+    stateDb.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)");
+    stateDb.prepare("INSERT INTO threads VALUES ('thread-total', ?)").run(rolloutPath);
+    stateDb.close();
+    const at = new Date().toISOString();
+    writeFileSync(rolloutPath, [
+      { type: "turn_context", timestamp: at, payload: { model: "gpt-6.1", effort: "high" } },
+      { type: "event_msg", timestamp: at, payload: { type: "task_complete" } },
+      { type: "event_msg", timestamp: at, payload: { type: "token_count", info: {
+        last_token_usage: { input_tokens: 800, output_tokens: 100, cached_input_tokens: 600, total_tokens: 900 },
+        total_token_usage: { input_tokens: 8000, output_tokens: 1000, cached_input_tokens: 6000, total_tokens: 9000 },
+        model_context_window: 10000,
+      } } },
+    ].map(value => JSON.stringify(value)).join("\n"));
+    try {
+      const usage = store.readCodexAndNormalize({ threadId: "thread-total", sessionName: "dev-impl@test-rig", codexHome: root });
+      expect(usage.usedPercentage).toBe(9);
+      expect(usage.totalInputTokens).toBe(8000);
+      expect(usage.totalOutputTokens).toBe(1000);
+      expect(usage.totalCachedInputTokens).toBe(6000);
+      expect(usage.lastInference).toEqual({ inputTokens: 800, outputTokens: 100, cachedInputTokens: 600, totalTokens: 900, at });
+      const { node } = seedNode();
+      store.persist(node.id, usage);
+      const single = store.getForNode(node.id, "dev-impl@test-rig");
+      const bulk = store.getForNodes([{ nodeId: node.id, currentSessionName: "dev-impl@test-rig" }]).get(node.id)!;
+      for (const restored of [single, bulk]) {
+        expect(restored.lastInference).toEqual(usage.lastInference);
+        expect(restored.totalCachedInputTokens).toBe(6000);
+        expect(restored.execution).toEqual(usage.execution);
+        expect(restored.runtimeMetadata).toEqual(usage.runtimeMetadata);
+        expect(restored.currentUsage).toEqual(usage.currentUsage);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("honors one explicit account root and never falls back to the daemon account", () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-explicit-home-"));
+    const account = join(root, "selected");
+    const daemon = join(root, "daemon");
+    for (const [home, input] of [[account, 100], [daemon, 700]] as const) {
+      mkdirSync(home);
+      const rolloutPath = join(home, "rollout.jsonl");
+      const state = new BetterSqlite3(join(home, "state_5.sqlite"));
+      state.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)");
+      state.prepare("INSERT INTO threads VALUES ('same-thread', ?)").run(rolloutPath);
+      state.close();
+      writeFileSync(rolloutPath, JSON.stringify({ type: "event_msg", timestamp: new Date().toISOString(),
+        payload: { type: "token_count", info: { last_token_usage: { input_tokens: input, output_tokens: 0 }, model_context_window: 1000 } } }));
+    }
+    try {
+      const selected = new ContextUsageStore(db, { stateDir: root, codexHome: daemon });
+      expect(selected.readCodexAndNormalize({ threadId: "same-thread", sessionName: "seat", codexHome: account }).usedPercentage).toBe(10);
+      expect(selected.readCodexAndNormalize({ threadId: "same-thread", sessionName: "seat" }).usedPercentage).toBe(70);
+      expect(selected.readCodexTranscriptPath("same-thread", account)).toBe(join(account, "rollout.jsonl"));
+      for (const missing of [join(root, "missing"), "", "relative"]) {
+        expect(selected.readCodexAndNormalize({ threadId: "same-thread", sessionName: "seat", codexHome: missing }).availability).toBe("unknown");
+        expect(selected.readCodexTranscriptPath("same-thread", missing)).toBeNull();
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("preserves observed Claude cache metrics without inventing accumulated cache", () => {
+    const { node } = seedNode();
+    const usage = store.normalizeSample(VALID_SIDECAR_WITH_OBJECT_USAGE);
+    expect(usage.lastInference).toMatchObject({ inputTokens: 3, outputTokens: 129, cachedInputTokens: 251672, totalTokens: 251883 });
+    expect(usage.totalCachedInputTokens).toBeUndefined();
+    store.persist(node.id, usage);
+    expect(store.getForNode(node.id, "dev-impl@test-rig").lastInference).toEqual(usage.lastInference);
+  });
+
+  it("preserves historical inference time across native adoption only with the current verified generation", () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-adoption-proof-"));
+    const rolloutPath = join(root, "rollout.jsonl");
+    const state = new BetterSqlite3(join(root, "state_5.sqlite"));
+    state.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)");
+    state.prepare("INSERT INTO threads VALUES ('retained-native-thread', ?)").run(rolloutPath);
+    state.close();
+    const nativeAt = new Date(Date.now() - 3 * 86400000).toISOString();
+    const adoptedAt = new Date(Date.now() - 86400000).toISOString();
+    writeFileSync(rolloutPath, JSON.stringify({ timestamp: nativeAt, type: "event_msg",
+      payload: { type: "token_count", info: {
+        last_token_usage: { input_tokens: 100, output_tokens: 10, cached_input_tokens: 80, total_tokens: 110 },
+        total_token_usage: { input_tokens: 900, output_tokens: 100, cached_input_tokens: 800 }, model_context_window: 1000,
+      } } }));
+    let generation: string | null = "adopted-occupant";
+    const options = { stateDir: root, codexHome: root, resolveOccupantBootAt: () => adoptedAt,
+      resolveOccupantGeneration: () => generation };
+    const observedStore = new ContextUsageStore(db, options);
+    const { node } = seedNode();
+    try {
+      const normalized = observedStore.readCodexAndNormalize({ threadId: "retained-native-thread", sessionName: "dev-impl@test-rig",
+        codexHome: root, verifiedGeneration: "adopted-occupant" });
+      observedStore.persist(node.id, normalized);
+      // A new store simulates daemon restart: provenance is durable, not an in-memory exemption.
+      const restarted = new ContextUsageStore(db, options);
+      const single = restarted.getForNode(node.id, "dev-impl@test-rig");
+      const bulk = restarted.getForNodes([{ nodeId: node.id, currentSessionName: "dev-impl@test-rig" }]).get(node.id)!;
+      for (const usage of [single, bulk]) {
+        expect(usage.availability).toBe("known");
+        expect(usage.usedPercentage).toBe(11);
+        expect(usage.sampledAt).toBe(nativeAt);
+        expect(usage.lastInference?.at).toBe(nativeAt);
+        expect(usage.fresh).toBe(false);
+        expect(usage.totalCachedInputTokens).toBe(800);
+      }
+      generation = "successor-occupant";
+      expect(restarted.getForNode(node.id, "dev-impl@test-rig").reason).toBe("stale_generation");
+      expect(restarted.getForNodes([{ nodeId: node.id, currentSessionName: "dev-impl@test-rig" }]).get(node.id)?.reason).toBe("stale_generation");
+      generation = null;
+      expect(restarted.getForNode(node.id, "dev-impl@test-rig").availability).toBe("unknown");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("never grants a generation exemption to unverified or daemon-home-only reads", () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-no-adoption-proof-"));
+    const rolloutPath = join(root, "rollout.jsonl");
+    const state = new BetterSqlite3(join(root, "state_5.sqlite"));
+    state.exec("CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)");
+    state.prepare("INSERT INTO threads VALUES ('thread', ?)").run(rolloutPath);
+    state.close();
+    const nativeAt = new Date(Date.now() - 3 * 86400000).toISOString();
+    const bootAt = new Date(Date.now() - 86400000).toISOString();
+    writeFileSync(rolloutPath, JSON.stringify({ timestamp: nativeAt, type: "event_msg", payload: { type: "token_count",
+      info: { last_token_usage: { input_tokens: 100 }, model_context_window: 1000 } } }));
+    const genStore = new ContextUsageStore(db, { stateDir: root, codexHome: root,
+      resolveOccupantBootAt: () => bootAt, resolveOccupantGeneration: () => "current" });
+    const { node } = seedNode();
+    try {
+      for (const selection of [{ codexHome: root }, { verifiedGeneration: "current" }, { codexHome: root, verifiedGeneration: "wrong" }]) {
+        const usage = genStore.readCodexAndNormalize({ threadId: "thread", sessionName: "dev-impl@test-rig", ...selection });
+        genStore.persist(node.id, usage);
+        expect(genStore.getForNode(node.id, "dev-impl@test-rig").reason).toBe("stale_generation");
+      }
+      // Even a newly written native record cannot revive an explicitly retired UUID.
+      writeFileSync(rolloutPath, JSON.stringify({ timestamp: new Date().toISOString(), type: "event_msg", payload: { type: "token_count",
+        info: { last_token_usage: { input_tokens: 100 }, model_context_window: 1000 } } }));
+      genStore.persist(node.id, genStore.readCodexAndNormalize({ threadId: "thread", sessionName: "dev-impl@test-rig", codexHome: root, verifiedGeneration: "wrong" }));
+      expect(genStore.getForNode(node.id, "dev-impl@test-rig").reason).toBe("stale_generation");
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   // T2: Missing sidecar -> unknown with reason

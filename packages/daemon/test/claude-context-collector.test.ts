@@ -67,6 +67,16 @@ describe("Claude Status Line Collector Script", () => {
   });
 
   // T2: Atomic write (no .tmp left behind on success)
+  it("retains the native status-line model id without unrelated payload fields", () => {
+    const outputPath = join(tmpDir, "context", "model.json");
+    const result = spawnSync("node", [collectorPath, outputPath], {
+      encoding: "utf-8",
+      input: JSON.stringify({ ...JSON.parse(VALID_STATUS_LINE), model: { id: "claude-opus-5-5", display_name: "Opus", unrelated: "private" } }),
+    });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(readFileSync(outputPath, "utf-8")).model).toEqual({ id: "claude-opus-5-5" });
+  });
+
   it("writes atomically — no .tmp file left behind", () => {
     const outputPath = join(tmpDir, "context", "atomic.json");
     execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath} ${outputPath}`, { encoding: "utf-8" });

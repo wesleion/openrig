@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { SUBSCRIPTION_BILLING_ENV } from "./provider/seat-account-homes.js";
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
@@ -10,6 +11,7 @@ export const SEAT_PUBLIC_ENV_KEYS = [
   "OPENRIG_HOME", "OPENRIG_URL", "OPENRIG_HOST", "OPENRIG_PORT",
   "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME",
   "OPENRIG_OCCUPANT_GENERATION", "OPENRIG_TRANSCRIPTS_LINES",
+  "OPENRIG_ACCOUNT_REF", "OPENRIG_ACCOUNT_EPOCH",
   "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
 ] as const;
 
@@ -83,7 +85,8 @@ export class SeatLaunchEnvironment {
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
     private readonly daemonCwd: string,
     private readonly cliPath?: string,
-    private readonly codexHome?: string) {}
+    private readonly codexHome?: string,
+    private readonly accountEnvironment?: (session: string, runtime?: string) => Record<string, string>) {}
 
   private rigBin(): string {
     const cli = realpathSync(this.cliPath ?? pairedCli());
@@ -101,11 +104,16 @@ export class SeatLaunchEnvironment {
   }
 
   async command(session: string, command: string, target: { codexCwd?: string; nodeId?: string; generation?: string; runtime?: string } = {}): Promise<string> {
+    // Resolve outside the best-effort branch: never silently launch a mapped
+    // seat under the daemon's global account when its selection is invalid.
+    const accountEnv = this.accountEnvironment?.(session, target.runtime ?? (target.codexCwd !== undefined ? "codex" : undefined)) ?? {};
+    const noBilling = accountEnv.OPENRIG_ACCOUNT_REF ? SUBSCRIPTION_BILLING_ENV.map(key => `-u ${key}`).join(" ") : "";
     const searchPath = this.sessionEnv.PATH;
     const codexEnv = target.codexCwd !== undefined
       ? [searchPath ? `PATH=${shellQuote(searchPath)}` : "", this.codexHome ? `CODEX_HOME=${shellQuote(this.codexHome)}` : ""].filter(Boolean)
       : [];
-    const fallback = codexEnv.length ? `env ${codexEnv.join(" ")} ${command}` : command;
+    const fallbackEnv = [...codexEnv, ...Object.entries(accountEnv).map(([k, v]) => `${k}=${shellQuote(v)}`)];
+    const fallback = fallbackEnv.length ? `env ${noBilling} ${fallbackEnv.join(" ")} ${command}` : command;
     try {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
       const shell = path.basename(await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
@@ -137,15 +145,17 @@ export class SeatLaunchEnvironment {
       const binDir = this.rigBin();
       const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
       if (target.codexCwd !== undefined && this.codexHome) env.CODEX_HOME = this.codexHome;
+      Object.assign(env, accountEnv);
       // Classic Claude may be an rc alias or function, not a PATH executable.
       // Its caller sources the staged command in a pane-shell subshell. Leading
       // assignments preserve shell lookup; /usr/bin/env would bypass it.
       if (target.runtime === "claude-code") {
         const assignments = Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`);
-        return `${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+        const launch = `${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+        return accountEnv.OPENRIG_ACCOUNT_REF ? `(unset ${SUBSCRIPTION_BILLING_ENV.join(" ")}; ${launch})` : launch;
       }
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
-      return `/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+      return `/usr/bin/env ${noBilling} ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
     } catch {
       // This best-effort correction is not a new launch admission gate. Do not
       // include error details: transport errors may contain environment values.

@@ -153,6 +153,7 @@ export interface LiveSeatRow {
   canonicalSessionName: string | null;
   /** Runtime identity from the live node inventory (for provider-specific agent hints). */
   runtime?: string | null;
+  controller?: { kind: string; command: string | null };
   /** "tmux" for tmux-backed seats; other kinds have no attachable pane. */
   attachmentType: string | null;
   /** The tmux session name (canonical session name for tmux-backed seats). */
@@ -193,6 +194,7 @@ export function deriveViewMembers(
       seat,
       label,
       ...(row.runtime ? { runtime: row.runtime } : {}),
+      ...(!opts.host && row.controller ? { controller: row.controller } : {}),
       tmuxSession,
       host: opts.host ?? null,
       readOnly: opts.readOnly === true,

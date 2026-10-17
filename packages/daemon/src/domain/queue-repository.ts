@@ -657,6 +657,9 @@ export interface QueueDestinationAdvisory {
 }
 
 export class QueueRepository {
+  private beforeWake?: (qitemId: string, destination: string) => Promise<{ ok: boolean; destination?: string; reason?: string }>;
+
+  attachBeforeWake(prepare: NonNullable<QueueRepository["beforeWake"]>): void { this.beforeWake = prepare; }
   readonly db: Database.Database;
   readonly transitionLog: QueueTransitionLog;
   private readonly eventBus: EventBus;
@@ -1327,6 +1330,11 @@ export class QueueRepository {
     }
     if (destClass.class === "unroutable") {
       return { classified: "failed", nudgeResult: destClass.teaching };
+    }
+    if (this.beforeWake) {
+      const prepared = await this.beforeWake(qitemId, destinationSession);
+      if (!prepared.ok) return { classified: "failed", nudgeResult: `failed:${prepared.reason ?? "renewal_destination_unverified"}` };
+      destinationSession = prepared.destination ?? destinationSession;
     }
     const stampISO = new Date().toISOString();
     let text: string;

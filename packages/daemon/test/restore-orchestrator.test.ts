@@ -2348,6 +2348,23 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("a terminal seat with a prior occupant but no token relaunches its shell instead of awaiting-decision", async () => {
+    // dev.jev (2026-10-16): the relaunched terminal occupant carried the default resume_if_possible,
+    // so the next restore stopped here although a terminal has no conversation to resume.
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.jev", { runtime: "terminal" });
+    const session = sessionRegistry.registerSession(node.id, "dev-jev@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const result = await createOrchestrator().restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.result.nodes.find((n) => n.nodeId === node.id)!.status).not.toBe("awaiting-decision");
+  });
+
   it("pod-aware restore with a prior session but no captured token lands awaiting-decision, not silent fresh-prime (FR-7 Gap 1)", async () => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-3", rig.id, "Dev");

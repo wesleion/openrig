@@ -32,6 +32,8 @@ process.stdin.on("end", () => {
     }
 
     const sample = {
+      ...(typeof raw.model?.id === "string" && raw.model.id.trim()
+        ? { model: { id: raw.model.id.trim() } } : {}),
       context_window: {
         context_window_size: contextWindow.context_window_size ?? null,
         used_percentage: contextWindow.used_percentage ?? null,
@@ -64,6 +66,12 @@ process.stdin.on("end", () => {
       const rateLimits = normalizeRateLimits(raw.rate_limits);
       const providerUsage = {
         seatSession: raw.session_name || raw.session_id,
+        nativeSession: raw.session_id ?? null,
+        nodeId: process.env.OPENRIG_NODE_ID || null,
+        generation: process.env.OPENRIG_OCCUPANT_GENERATION || null,
+        accountRef: process.env.OPENRIG_ACCOUNT_REF || null,
+        accountHome: process.env.CLAUDE_CONFIG_DIR || null,
+        accountEpoch: process.env.OPENRIG_ACCOUNT_EPOCH || null,
         asOf: new Date().toISOString(),
         ...(rateLimits ? { accountKind: "subscription", rateLimits } : {}),
       };

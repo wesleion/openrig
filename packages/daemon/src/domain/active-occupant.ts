@@ -172,3 +172,11 @@ export function deriveRehydrateSessionIdByNode(
   }
   return relation;
 }
+
+/** The restore policy that applies to an occupant. A terminal seat has no native conversation to
+ *  resume (relaunching its shell IS the restore), but relaunch paths record its occupant with the
+ *  column default resume_if_possible; trusting that made every later restore stop for a missing
+ *  token (dev.jev, operator.human, 2026-10-16). Shared by restore and its preview so they agree. */
+export function occupantRestorePolicy(runtime: string | null | undefined, policy: string | null | undefined): string {
+  return runtime === "terminal" ? "checkpoint_only" : policy ?? "resume_if_possible";
+}

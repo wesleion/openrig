@@ -252,8 +252,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     // honest-unknown: availability "unknown" → null cells; lifecycleState verbatim
     const qa = dev?.agents[1];
     expect(qa).toMatchObject({ context: null, tokens: null, status: "unknown", canRun: true });
-    // infrastructure nodes are not agent rows
-    expect(local?.rigs[0]?.pods.flatMap((p) => p.agents.map((a) => a.name))).not.toContain("svc.db");
+    // Infrastructure is visible in topology and remains explicitly typed.
+    expect(local?.rigs[0]?.pods.flatMap((p) => p.agents).find(a => a.name === "svc.db")?.nodeKind).toBe("infrastructure");
   });
 
   it("keeps the two stuck legs DISTINCT — served evidence/threshold strings verbatim, no client threshold", async () => {

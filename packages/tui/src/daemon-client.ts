@@ -351,6 +351,18 @@ export class DaemonClient {
     return (await this.post(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}/launch`, {})) as LaunchNodeResult;
   }
 
+  async setControllerMode(rigId: string, nodeId: string, mode: "off" | "observe" | "apply", expectedRevision?: number): Promise<import("./types.js").ControllerView> {
+    const route = `/api/rigs/${encodeURIComponent(rigId)}/controllers/${encodeURIComponent(nodeId)}`;
+    const res = await this.fetchImpl(`${this.baseUrl}${route}`, {
+      method: "PATCH", headers: { ...this.headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, ...(expectedRevision !== undefined ? { expectedRevision } : {}) }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const parsed = await res.json().catch(() => null) as (import("./types.js").ControllerView & { error?: string }) | null;
+    if (!res.ok || parsed?.kind !== "jev-flow" || !parsed.mode) throw new Error(`controller mode failed: ${res.status} — ${parsed?.error ?? "invalid response"}`);
+    return parsed;
+  }
+
   async startupRequest<T>(route: string, body?: unknown): Promise<T> {
     const response = await this.fetchImpl(`${this.baseUrl}/api/startup${route}`, {
       method: body === undefined ? "GET" : "POST",

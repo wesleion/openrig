@@ -1028,11 +1028,14 @@ function canonicalizeJsonValue(value: unknown): unknown {
   return value;
 }
 
-const CODEX_HOOK_EVENT_KEY_LABEL: Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], string> = {
+type TrustedCodexHookEvent = (typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number] | "PreToolUse" | "PostToolUse";
+const CODEX_HOOK_EVENT_KEY_LABEL: Record<TrustedCodexHookEvent, string> = {
   SessionStart: "session_start",
   UserPromptSubmit: "user_prompt_submit",
   Stop: "stop",
   PermissionRequest: "permission_request",
+  PreToolUse: "pre_tool_use",
+  PostToolUse: "post_tool_use",
 };
 
 export interface CodexHookTrustInput {
@@ -1058,7 +1061,7 @@ export interface CodexHookTrustInput {
  * PROVISIONAL-until-VM-read-back caveat.
  */
 export function computeCodexHookTrust(
-  event: (typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number],
+  event: TrustedCodexHookEvent,
   input: CodexHookTrustInput,
 ): { key: string; hash: string } {
   const label = CODEX_HOOK_EVENT_KEY_LABEL[event];

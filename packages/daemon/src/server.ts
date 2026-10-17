@@ -146,8 +146,10 @@ import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
+import { controllerRoutes } from "./routes/controllers.js";
 
 export interface AppDeps {
+  controllerService?: import("./domain/controller-service.js").ControllerService;
   humanDecisionService?: HumanDecisionService;
   humanBridgeHome?: string;
   networkPeerAddress?: Parameters<typeof networkWriteAuth>[0]["peerAddress"];
@@ -172,6 +174,7 @@ export interface AppDeps {
   snapshotRepo: SnapshotRepository;
   /** Slice-04 OPR.0.5.0.4: the provider read-model/precheck/switch service. Routes 503 honestly if absent. */
   providerService?: ProviderService;
+  providerAccountManager?: import("./domain/provider/provider-account-manager.js").ProviderAccountManager;
   restoreOrchestrator: RestoreOrchestrator;
   // OPR.0.4.3.20 FR-4 — for refresh-before-serialize on the manual snapshot route.
   resumeMetadataRefresher?: import("./domain/resume-metadata-refresher.js").ResumeMetadataRefresher;
@@ -519,6 +522,7 @@ export function createApp(deps: AppDeps): Hono {
   // Inject dependencies into context for all routes
   app.use("*", async (c, next) => {
     c.set("rigRepo" as never, deps.rigRepo);
+    c.set("controllerService" as never, deps.controllerService);
     c.set("sessionRegistry" as never, deps.sessionRegistry);
     c.set("eventBus" as never, deps.eventBus);
     c.set("nodeLauncher" as never, deps.nodeLauncher);
@@ -736,6 +740,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.route("/api/rigs", rigsRoutes);
+  app.route("/api/rigs/:rigId/controllers", controllerRoutes);
   app.route("/api/rigs/:rigId/sessions", sessionsRoutes);
   // Slice 24 — per-rig CMUX workspace launcher.
   app.route("/api/rigs/:rigId/cmux", rigCmuxRoutes);

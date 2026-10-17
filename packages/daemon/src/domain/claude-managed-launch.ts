@@ -7,6 +7,7 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
 import { parseClaudePermissionModes } from "./permission-drift.js";
 import { validateNativePermissionSelection } from "./native-permission-selection.js";
+import { SUBSCRIPTION_BILLING_ENV } from "./provider/seat-account-homes.js";
 
 export interface ClaudeLaunchTarget {
   nodeId: string;
@@ -30,7 +31,8 @@ interface TargetSnapshot {
 export class ClaudeManagedLaunch {
   constructor(private readonly db: Database.Database,
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
-    private readonly rendererEnv: Readonly<NodeJS.ProcessEnv>) {}
+    private readonly rendererEnv: Readonly<NodeJS.ProcessEnv>,
+    private readonly accountEnvironment?: (session: string, runtime?: string) => Record<string, string>) {}
 
   private target(nodeId: string): TargetSnapshot {
     const row = this.db.prepare(`SELECT n.id AS nodeId, n.runtime, n.cwd,
@@ -53,8 +55,8 @@ export class ClaudeManagedLaunch {
    * Unset config uses HOME/.claude.json; even an explicit default-looking
    * directory selects <configDir>/.claude.json instead (#154/#225).
    */
-  configPaths(cwd: string): { configDir: string; statePath: string } {
-    const { HOME, CLAUDE_CONFIG_DIR } = this.sessionEnv;
+  configPaths(cwd: string, session?: string): { configDir: string; statePath: string } {
+    const { HOME, CLAUDE_CONFIG_DIR } = { ...this.sessionEnv, ...(session ? this.accountEnvironment?.(session, "claude-code") : {}) };
     if (!HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: absolute HOME is required.");
     const configDir = path.resolve(cwd, CLAUDE_CONFIG_DIR ?? path.join(HOME, ".claude"));
     return { configDir, statePath: path.join(CLAUDE_CONFIG_DIR === undefined ? HOME : configDir, ".claude.json") };
@@ -62,18 +64,20 @@ export class ClaudeManagedLaunch {
 
   /** The state file under the daemon's own non-empty CLAUDE_CONFIG_DIR, or undefined when the daemon
    * selects none. Classic bootstrap provisions it in addition to HOME/.claude.json. */
-  selectedStatePath(cwd: string): string | undefined {
-    return this.sessionEnv.CLAUDE_CONFIG_DIR ? this.configPaths(cwd).statePath : undefined;
+  selectedStatePath(cwd: string, session?: string): string | undefined {
+    return (this.sessionEnv.CLAUDE_CONFIG_DIR || (session && this.accountEnvironment?.(session, "claude-code").CLAUDE_CONFIG_DIR))
+      ? this.configPaths(cwd, session).statePath : undefined;
   }
 
-  private context(cwd: string) {
-    const { PATH, HOME, CLAUDE_CONFIG_DIR } = this.sessionEnv;
+  private context(cwd: string, session?: string) {
+    const accountEnv = session ? this.accountEnvironment?.(session, "claude-code") ?? {} : {};
+    const { PATH, HOME, CLAUDE_CONFIG_DIR } = { ...this.sessionEnv, ...accountEnv };
     if (!PATH || !HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: managed PATH and absolute HOME are required.");
     // Relative/empty PATH entries are interpreted at the intended seat cwd,
     // including for /usr/bin/env shebangs inside the selected executable.
     const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, p));
-    const { configDir } = this.configPaths(cwd);
-    const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME };
+    const { configDir } = this.configPaths(cwd, session);
+    const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME, ...accountEnv };
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
     if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
@@ -108,17 +112,20 @@ export class ClaudeManagedLaunch {
       || (target.pane != null && target.pane !== before.pane)) {
       throw new Error("Claude managed launch target disagrees with the current binding; no input or selection changed.");
     }
-    const context = this.context(cwd);
+    const context = this.context(cwd, before.session ?? target.session);
+    const subscription = context.env.OPENRIG_ACCOUNT_REF !== undefined;
     // This is the existing managed session channel, not arbitrary shell variables.
     // Filter out the explicit capability environment and overwrite launch identity.
     const inherited = Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
-      && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key));
+      && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key)
+      && !(subscription && (SUBSCRIPTION_BILLING_ENV as readonly string[]).includes(key)));
     if (inherited.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
     const assertCurrent = () => {
       if (JSON.stringify(this.target(target.nodeId)) !== JSON.stringify(before)
-        || JSON.stringify(this.context(cwd)) !== JSON.stringify(context)
+        || JSON.stringify(this.context(cwd, before.session ?? target.session)) !== JSON.stringify(context)
         || JSON.stringify(Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
-          && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key))) !== JSON.stringify(inherited)) {
+          && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key)
+          && !(subscription && (SUBSCRIPTION_BILLING_ENV as readonly string[]).includes(key)))) !== JSON.stringify(inherited)) {
         throw new Error("Claude managed launch context changed during capability discovery/input; retry explicitly.");
       }
     };

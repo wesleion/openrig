@@ -21,6 +21,7 @@ import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
+import { isCanonicalClaudeCompactionPlugin, reconcileClaudeCompactionProjection } from "./claude-compaction-projection.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -35,6 +36,8 @@ export interface ClaudeAdapterFsOps {
   chmod?(path: string, mode: number): void;
   /** List files in a directory (for session token capture). */
   readdir?(dirPath: string): string[];
+  /** Inspect without following symlinks. Virtual filesystems should supply their own implementation. */
+  inspectPath?(path: string): "file" | "directory" | "symlink" | "other" | "missing";
   /** User home directory (for session file lookup). */
   homedir?: string;
 }
@@ -93,7 +96,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }) {
     this.tmux = deps.tmux;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
-    this.fs = deps.fsOps;
+    this.fs = { ...deps.fsOps, inspectPath: deps.fsOps.inspectPath ?? ((target: string) => {
+      try {
+        const stat = fs.lstatSync(target);
+        return stat.isSymbolicLink() ? "symlink" : stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other";
+      } catch (error) {
+        if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return "missing";
+        throw error;
+      }
+    }) };
     this.sessionIdFactory = deps.sessionIdFactory ?? randomUUID;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.stateDir = deps.stateDir ?? null;
@@ -163,6 +174,22 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         const idx = projected.indexOf(e.effectiveId);
         if (idx >= 0) projected.splice(idx, 1);
         if (!skipped.includes(e.effectiveId)) skipped.push(e.effectiveId);
+      }
+    }
+
+    // Native skill discovery and compaction hooks do not require loading the
+    // whole plugin. Reconcile only a successfully selected canonical plugin;
+    // another seat's absence is not authority to strip a shared cwd's assets.
+    const compactionPlugin = plan.entries.find(entry => entry.category === "plugin"
+      && projected.includes(entry.effectiveId)
+      && isCanonicalClaudeCompactionPlugin(this.fs, entry.absolutePath));
+    if (compactionPlugin) {
+      try {
+        const outcome = reconcileClaudeCompactionProjection({ fs: this.fs, cwd: binding.cwd,
+          pluginPath: compactionPlugin.absolutePath, recordProjection: this.recordProjection });
+        warnings.push(...outcome.warnings);
+      } catch (error) {
+        warnings.push(`Claude compaction projection failed: ${(error as Error).message}. Read the canonical skill directly from ${nodePath.join(compactionPlugin.absolutePath, "skills", "claude-compaction-restore", "SKILL.md")}.`);
       }
     }
 
@@ -706,7 +733,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const statePaths: string[] = [];
     const failures: string[] = [];
     if (managed) {
-      if (cwd) statePaths.push(managed.configPaths(cwd).statePath);
+      if (cwd) statePaths.push(managed.configPaths(cwd, binding.tmuxSession ?? undefined).statePath);
     } else {
       if (home) statePaths.push(nodePath.join(home, ".claude.json"));
       // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
@@ -716,7 +743,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // selected home untouched: a child that inherits the daemon's selection read neither.
       try {
         const selectedCwd = cwd ?? (binding.nodeId ? this.claudeManagedLaunch?.boundCwd(binding.nodeId) : undefined);
-        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd) : undefined;
+        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd, binding.tmuxSession ?? undefined) : undefined;
         if (selected && !statePaths.includes(selected)) statePaths.push(selected);
       } catch (err) {
         failures.push((err as Error).message);

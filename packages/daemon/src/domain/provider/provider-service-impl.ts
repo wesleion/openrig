@@ -5,6 +5,7 @@
 // is the D seam; until it lands, switch returns an honest failed_safely with an operational reason.
 
 import type Database from "better-sqlite3";
+import type { ProviderAccountManager } from "./provider-account-manager.js";
 import {
   AGENT_ACTIVITY_FRESHNESS_MS,
   type AgentActivityStore,
@@ -37,9 +38,22 @@ export interface ProviderServiceImplDeps {
 }
 
 export class ProviderServiceImpl implements ProviderService {
+  private accountManager?: ProviderAccountManager;
   constructor(private readonly deps: ProviderServiceImplDeps) {}
 
+  setAccountManager(manager: ProviderAccountManager): void { this.accountManager = manager; }
+  rotation(rig?: string): unknown { return this.accountManager?.rotation(rig) ?? { unavailable: true }; }
+  setRotation(rig: string, enabled: boolean): unknown {
+    if (!this.accountManager) throw new Error("Account manager unavailable.");
+    return this.accountManager.setRotation(rig, enabled);
+  }
+  register(account: string): unknown {
+    if (!this.accountManager) throw new Error("Account manager unavailable.");
+    return this.accountManager.register(account);
+  }
+
   async getReadModel(): Promise<FourBlockReadModel> {
+    if (this.accountManager) return this.accountManager.getReadModel();
     const env = this.deps.env ?? process.env;
     const asOf = (this.deps.now ?? (() => new Date().toISOString()))();
     let auth: CodexAuthMetadata | undefined;
@@ -89,6 +103,7 @@ export class ProviderServiceImpl implements ProviderService {
   }
 
   async precheck(input: ProviderPrecheckInput): Promise<PrecheckResult> {
+    if (this.accountManager) return this.accountManager.precheck(input);
     const model = await this.getReadModel();
     const target = model.accounts.find((a) => a.accountId === input.toAccount);
     // Validate-at-use: an unknown target OR unknown auth fails closed (BR-3 — disk presence never
@@ -103,6 +118,7 @@ export class ProviderServiceImpl implements ProviderService {
   }
 
   async switchAccount(input: ProviderSwitchInput): Promise<ProviderSwitchResult> {
+    if (this.accountManager) return this.accountManager.switchAccount(input);
     // Precheck-gate: never switch past an unsafe verdict unless explicitly forced.
     const verdict = await this.precheck({ seat: input.seat, toAccount: input.toAccount });
     if (verdict.safe === false && !input.forceUnsafe) {

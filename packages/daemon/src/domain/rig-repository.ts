@@ -118,10 +118,12 @@ export function archiveWhereClause(col: string, filter?: RigArchiveFilter): stri
 }
 
 interface NodeOptions {
+  sessionRenewal?: import("./session-renewal-store.js").SessionRenewalOverride;
   role?: string;
   runtime?: string;
   model?: string;
   effort?: string;
+  controller?: import("./types.js").ControllerBinding;
   codexConfigProfile?: string;
   /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF (builtin:<name> or spec-relative path). */
   permissionPolicy?: string;
@@ -161,6 +163,11 @@ export class RigRepository {
     );
     this.onRigCreated?.(rig);
     return rig;
+  }
+
+  setRigSessionRenewal(rigId: string, policy: import("./session-renewal-store.js").SessionRenewalOverride | null): void {
+    if (!this.hasRigColumn("session_renewal_json")) return;
+    this.db.prepare("UPDATE rigs SET session_renewal_json=? WHERE id=?").run(policy ? JSON.stringify(policy) : null, rigId);
   }
 
   /**
@@ -449,6 +456,12 @@ export class RigRepository {
       this.db.prepare("UPDATE nodes SET effort = ? WHERE id = ?")
         .run(opts.effort, id);
     }
+    if (opts?.controller) {
+      this.db.prepare("UPDATE nodes SET controller_json = ? WHERE id = ?").run(JSON.stringify(opts.controller), id);
+    }
+    if (opts?.sessionRenewal && this.hasNodeColumn("session_renewal_json")) {
+      this.db.prepare("UPDATE nodes SET session_renewal_json=? WHERE id=?").run(JSON.stringify(opts.sessionRenewal), id);
+    }
 
     return this.rowToNode(
       this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(id) as NodeRow
@@ -707,6 +720,8 @@ export class RigRepository {
 
   private rowToRig(row: RigRow): Rig {
     return {
+      ...((row as RigRow & { session_renewal_json?: string }).session_renewal_json
+        ? { sessionRenewal: JSON.parse((row as RigRow & { session_renewal_json: string }).session_renewal_json) } : {}),
       id: row.id,
       name: row.name,
       createdAt: row.created_at,
@@ -716,6 +731,8 @@ export class RigRepository {
 
   private rowToNode(row: NodeRow): Node {
     return {
+      ...((row as NodeRow & { session_renewal_json?: string }).session_renewal_json
+        ? { sessionRenewal: JSON.parse((row as NodeRow & { session_renewal_json: string }).session_renewal_json) } : {}),
       id: row.id,
       rigId: row.rig_id,
       logicalId: row.logical_id,
@@ -723,6 +740,7 @@ export class RigRepository {
       runtime: row.runtime,
       model: row.model,
       effort: row.effort ?? null,
+      controller: row.controller_json ? JSON.parse(row.controller_json) : null,
       codexConfigProfile: row.codex_config_profile ?? null,
       permissionPolicy: row.permission_policy ?? null,
       cwd: row.cwd,
@@ -824,6 +842,7 @@ interface NodeRow {
   profile: string | null;
   label: string | null;
   session_source_json?: string | null;
+  controller_json?: string | null;
   resolved_spec_name: string | null;
   resolved_spec_version: string | null;
   resolved_spec_hash: string | null;

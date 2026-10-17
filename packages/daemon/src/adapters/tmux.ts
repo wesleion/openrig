@@ -601,11 +601,13 @@ export class TmuxAdapter {
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`
    * seats from colliding.
    */
-  async sendText(target: string, text: string, beforeInput?: () => void, options?: { bracketed?: boolean }): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }, options?.bracketed));
+  async sendText(target: string, text: string, beforeInput?: () => void | Promise<void>, options?: { bracketed?: boolean }): Promise<TmuxResult> {
+    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, async () => {
+      beforeWrite(); await beforeInput?.(); beforeWrite();
+    }, options?.bracketed));
   }
 
-  private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void, bracketed = true): Promise<TmuxResult> {
+  private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void | Promise<void>, bracketed = true): Promise<TmuxResult> {
     const path = this.fileOps.tmpName();
     const buffer = this.fileOps.bufferName();
     let bufferLoaded = false;
@@ -616,7 +618,7 @@ export class TmuxAdapter {
       await this.run(["tmux", "load-buffer", "-b", buffer, path],
         `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
       bufferLoaded = true;
-      beforeWrite();
+      await beforeWrite();
       // Explicit prompt answers need key input, not bracketed-paste framing.
       // Keep their bytes in the file: tmux command parsing and argv limits must
       // not alter semicolons or reject long answers (#519, #602).
@@ -714,8 +716,10 @@ export class TmuxAdapter {
     }
   }
 
-  async sendKeys(target: string, keys: string[], beforeInput?: () => void): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); beforeInput?.(); return this.sendKeysUnchecked(pane, keys); });
+  async sendKeys(target: string, keys: string[], beforeInput?: () => void | Promise<void>): Promise<TmuxResult> {
+    return this.guardedInput(target, async (pane, beforeWrite) => {
+      beforeWrite(); await beforeInput?.(); beforeWrite(); return this.sendKeysUnchecked(pane, keys);
+    });
   }
 
   private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {

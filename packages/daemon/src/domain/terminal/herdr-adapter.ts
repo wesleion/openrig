@@ -219,7 +219,21 @@ function herdrPaneCommand(pane: ComposedPane): string {
  * hint. Rows are built as equal `right` strips,
  * then combined with equal `down` strips.
  */
+export function controllerStripRatio(totalRows = 33): number {
+  return 1 - Math.min(0.30, Math.max(0.15, 6 / Math.max(1, totalRows)));
+}
+
 export function buildGridRoot(panes: ComposedPane[], columns?: number): { root: HerdrLayoutNode; blanks: number; columns: number; rows: number } {
+  const controllers = panes.filter(pane => pane.controller === "jev-flow");
+  const agents = panes.filter(pane => !pane.controller);
+  if (columns === undefined && controllers.length === 1
+    && (agents.length === 2 || agents.length === 3) && panes.length === agents.length + 1) {
+    const leaf = (pane: ComposedPane): HerdrPaneNode => ({ type: "pane", label: pane.label,
+      command: ["sh", "-c", herdrPaneCommand(pane)] });
+    return { root: { type: "split", direction: "down", ratio: controllerStripRatio(),
+      first: equalStrip(agents.map(leaf), "right"), second: leaf(controllers[0]!) },
+      blanks: 0, columns: agents.length, rows: 2 };
+  }
   const cols = Math.min(columns ?? autoGridCols(panes.length), panes.length || 1);
   const rows = Math.ceil(panes.length / cols);
   const blanks = rows * cols - panes.length;

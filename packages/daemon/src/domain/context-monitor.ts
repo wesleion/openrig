@@ -61,6 +61,7 @@ export class ContextMonitor {
     readinessCheckers?: Record<string, RuntimeReadinessChecker | undefined>,
     usageSamples?: UsageSamplesStore,
     providerWindowSampler?: () => ProviderWindowSampleInput[],
+    private resolveCodexRuntime?: (sessionName: string, nodeId: string) => Promise<{ threadId: string; codexHome: string; generationUuid: string } | null>,
   ) {
     this.db = db;
     this.store = store;
@@ -94,7 +95,7 @@ export class ContextMonitor {
       const canReadContextUsage = session.runtime !== "codex" || !!session.resume_token;
       if (canReadContextUsage) {
         try {
-          observed = this.readContextUsage(session);
+          observed = await this.readContextUsage(session);
           this.store.persist(session.node_id, observed);
           // 51-08 A1: the over-time twin — advance-only append on the SAME tick
           // (PM decision 1: piggyback, no parallel sampler). Known samples only:
@@ -148,21 +149,36 @@ export class ContextMonitor {
    * enforcer owns policy + dedup + send; ContextMonitor only relays
    * data and absorbs enforcer errors so a trigger-path fault never
    * crashes telemetry polling.
+   *
+   * Only a fresh, known sample can start a compaction. A stale or unknown
+   * sample still drains a post-compact stage that is already pending: the
+   * seat may take no turn after /compact, and only a turn refreshes its
+   * sample.
    */
   private async maybeAutoCompact(
     session: EligibleSession,
     usage: ContextUsage | null,
   ): Promise<void> {
     if (!this.compactionEnforcer) return;
-    if (!usage || usage.availability !== "known" || !usage.fresh) return;
     try {
-      await this.compactionEnforcer.maybeAutoCompact({
+      if (usage && usage.availability === "known" && usage.fresh && usage.usedPercentage != null) {
+        await this.compactionEnforcer.maybeAutoCompact({
+          sessionName: session.session_name,
+          cwd: session.cwd,
+          runtime: session.runtime,
+          usedPercentage: usage.usedPercentage,
+          transcriptPath: usage.transcriptPath,
+          sessionId: usage.sessionId,
+        });
+        return;
+      }
+      if (!this.compactionEnforcer.hasPendingPostCompactStage?.(session.session_name)) return;
+      await this.compactionEnforcer.drainPendingPostCompactStage({
         sessionName: session.session_name,
         cwd: session.cwd,
         runtime: session.runtime,
-        usedPercentage: usage.usedPercentage,
-        transcriptPath: usage.transcriptPath,
-        sessionId: usage.sessionId,
+        transcriptPath: usage?.transcriptPath ?? null,
+        sessionId: usage?.sessionId ?? null,
       });
     } catch {
       // Defensive: enforcer should not throw, but absorb here so the
@@ -221,11 +237,13 @@ export class ContextMonitor {
     `).all() as EligibleSession[];
   }
 
-  private readContextUsage(session: EligibleSession) {
+  private async readContextUsage(session: EligibleSession) {
     if (session.runtime === "codex") {
+      const live = this.resolveCodexRuntime ? await this.resolveCodexRuntime(session.session_name, session.node_id) : undefined;
       return this.store.readCodexAndNormalize({
-        threadId: session.resume_token,
+        threadId: this.resolveCodexRuntime ? live?.threadId : session.resume_token,
         sessionName: session.session_name,
+        ...(live ? { codexHome: live.codexHome, verifiedGeneration: live.generationUuid } : {}),
       });
     }
 

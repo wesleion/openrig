@@ -39,6 +39,8 @@ export interface SeatActivityServiceDeps {
   defaultWindowSeconds: number;
   eventBus?: EventBus;
   now?: () => Date;
+  db?: Database.Database;
+  resolveOccupantGeneration?: (seatNodeId: string) => string | null;
   /** S19: the self-report rung producer (Claude pid.json). Consulted per sweep for seats
    *  whose declared inventory staffs self-report; absent = the rung is absent. */
   selfReportReader?: (sessionName: string, seatNodeId: string) => ActivityEvidence | null;
@@ -53,6 +55,8 @@ export class SeatActivityService {
   private readonly defaultWindowSeconds: number;
   private readonly eventBus: EventBus | null;
   private readonly now: () => Date;
+  private readonly timingDb: Database.Database | null;
+  private readonly resolveOccupantGeneration: ((seatNodeId: string) => string | null) | null;
   private readonly latestByPaneId = new Map<string, SeatActivity>();
   // Single-flight guard: one whole-fleet window-activity sweep at a time, mirroring
   // seat-structural-activity-service (MUST-FIX 2). A slowed tmux can never accumulate
@@ -66,6 +70,8 @@ export class SeatActivityService {
     this.defaultWindowSeconds = deps.defaultWindowSeconds;
     this.eventBus = deps.eventBus ?? null;
     this.now = deps.now ?? (() => new Date());
+    this.timingDb = deps.db ?? null;
+    this.resolveOccupantGeneration = deps.resolveOccupantGeneration ?? null;
     this.selfReportReader = deps.selfReportReader ?? null;
   }
 
@@ -317,8 +323,11 @@ export class SeatActivityService {
    *  rung's trust drops to `absent` until the successor's adapter RE-DECLARES its
    *  inventory (AM-1 corollary: a successor never inherits rung authority). */
   declareOccupantSwap(seatNodeId: string, generation: string): void {
+    this.timingDb?.prepare("DELETE FROM seat_activity_timing WHERE seat_node_id = ?").run(seatNodeId);
     const seat = this.ladder.get(seatNodeId);
     if (!seat) return;
+    seat.timingGeneration = generation;
+    seat.timingChecked = true;
     seat.sources.clear();
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
@@ -333,6 +342,7 @@ export class SeatActivityService {
       decidedBy: null,
       seq: seat.arbitrated.seq + 1, // the swap IS a visible event
       changedAt: at,
+      activityStartedAt: at,
       rungs: this.rungsView(seat),
       lastSwap: { generation, at },
     };
@@ -395,6 +405,7 @@ export class SeatActivityService {
   private seatLadder(seatNodeId: string, sessionName: string): SeatLadderState {
     let seat = this.ladder.get(seatNodeId);
     if (!seat) {
+      const at = this.now().toISOString();
       seat = {
         sessionName,
         retired: false,
@@ -405,13 +416,16 @@ export class SeatActivityService {
         contradictionSinceMs: null,
         pendingIdle: null,
         waiters: [],
+        timingGeneration: null,
+        timingChecked: false,
         arbitrated: {
           seatNodeId,
           activity: "unknown",
           needsInput: { count: 0, reason: null },
           decidedBy: null,
           seq: 0,
-          changedAt: this.now().toISOString(),
+          changedAt: at,
+          activityStartedAt: at,
           rungs: [],
           lastSwap: null,
         },
@@ -614,7 +628,8 @@ export class SeatActivityService {
             ? selfEv.needsInput
             : { count: 0, reason: null };
 
-    const changed = nextActivity !== seat.arbitrated.activity
+    const activityChanged = nextActivity !== seat.arbitrated.activity;
+    const changed = activityChanged
       || needsInput.count !== seat.arbitrated.needsInput.count
       || needsInput.reason !== seat.arbitrated.needsInput.reason;
     seat.arbitrated = {
@@ -624,12 +639,62 @@ export class SeatActivityService {
       decidedBy,
       seq: changed ? seat.arbitrated.seq + 1 : seat.arbitrated.seq,
       changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,
+      activityStartedAt: this.updateActivityTiming(seat, nextActivity, activityChanged, candidate !== null),
       rungs: this.rungsView(seat),
     };
     if (changed) {
       this.resolveWaiters(seat);
       this.emitActivityChanged(seat);
     }
+  }
+
+  /** Recover only the timestamp after fresh evidence confirms the same occupant and activity.
+   * Rung authority, evidence, and activity itself are never restored from storage. */
+  private updateActivityTiming(seat: SeatLadderState, nextActivity: ActivityValue, activityChanged: boolean, hasEvidence: boolean): string {
+    const now = this.now().toISOString();
+    let startedAt = activityChanged ? now : seat.arbitrated.activityStartedAt;
+    const nodeId = seat.arbitrated.seatNodeId;
+    const generation = this.resolveOccupantGeneration?.(nodeId) ?? null;
+    if (!this.timingDb || !generation) return startedAt;
+    const generationChanged = seat.timingGeneration !== null && seat.timingGeneration !== generation;
+    if (generationChanged) {
+      this.timingDb.prepare("DELETE FROM seat_activity_timing WHERE seat_node_id = ?").run(nodeId);
+      startedAt = now;
+      seat.timingChecked = true;
+    }
+    seat.timingGeneration = generation;
+    if (seat.retired || nextActivity === "unknown") {
+      // Startup has no evidence yet: keep the row pending validation, never present it as state.
+      if (seat.retired || seat.timingChecked) {
+        this.timingDb.prepare("DELETE FROM seat_activity_timing WHERE seat_node_id = ?").run(nodeId);
+      }
+      return startedAt;
+    }
+    if (!hasEvidence) return startedAt;
+    const needsValidation = !seat.timingChecked;
+    if (needsValidation) {
+      const row = this.timingDb.prepare("SELECT * FROM seat_activity_timing WHERE seat_node_id = ?").get(nodeId) as {
+        generation: string; session_name: string; activity: string; activity_started_at: string;
+      } | undefined;
+      const storedAt = row ? Date.parse(row.activity_started_at) : NaN;
+      if (row && row.generation === generation && row.session_name === seat.sessionName
+        && row.activity === nextActivity && Number.isFinite(storedAt) && storedAt <= Date.parse(now)) {
+        startedAt = row.activity_started_at;
+      } else if (row) {
+        this.timingDb.prepare("DELETE FROM seat_activity_timing WHERE seat_node_id = ?").run(nodeId);
+      }
+      seat.timingChecked = true;
+    }
+    if (activityChanged || generationChanged || needsValidation) {
+      this.timingDb.prepare(`
+        INSERT INTO seat_activity_timing (seat_node_id, generation, session_name, activity, activity_started_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(seat_node_id) DO UPDATE SET generation = excluded.generation,
+          session_name = excluded.session_name, activity = excluded.activity,
+          activity_started_at = excluded.activity_started_at, updated_at = excluded.updated_at
+      `).run(nodeId, generation, seat.sessionName, nextActivity, startedAt, now);
+    }
+    return startedAt;
   }
 
   /** AM-R18 push substrate: a change notification (identity + seq) onto the bus — the
@@ -676,6 +741,8 @@ interface SeatLadderState {
   contradictionSinceMs: number | null;
   pendingIdle: { sinceMs: number; ticks: number; lastSeq: number } | null;
   waiters: SeatWaiter[];
+  timingGeneration: string | null;
+  timingChecked: boolean;
   arbitrated: ArbitratedSeatState;
 }
 
