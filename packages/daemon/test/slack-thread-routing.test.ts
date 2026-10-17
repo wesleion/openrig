@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { migrate } from "../src/db/migrate.js";
 import { threadSeatMapSchema } from "../src/db/migrations/072_thread_seat_map.js";
-import { threadPartMapSchema } from "../src/db/migrations/097_thread_part_map.js";
+import { threadPartMapSchema } from "../src/db/migrations/103_thread_part_map.js";
 import { ThreadSeatMap, formatPostedStamp, parsePostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
 import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
 import { InboundRouter, type SlackEvent } from "../src/domain/gateway/slack/inbound.js";

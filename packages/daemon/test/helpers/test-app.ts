@@ -1,7 +1,7 @@
-import { rigInstallRootSchema } from "../../src/db/migrations/096_rig_install_root.js";
-import { threadPartMapSchema } from "../../src/db/migrations/097_thread_part_map.js";
-import { queueTransitionsQitemIdOrderSchema } from "../../src/db/migrations/098_queue_transitions_qitem_id_order.js";
-import { queueItemsRecoveryTagsSchema } from "../../src/db/migrations/099_queue_items_recovery_tags.js";
+import { rigInstallRootSchema } from "../../src/db/migrations/102_rig_install_root.js";
+import { threadPartMapSchema } from "../../src/db/migrations/103_thread_part_map.js";
+import { queueTransitionsQitemIdOrderSchema } from "../../src/db/migrations/104_queue_transitions_qitem_id_order.js";
+import { queueItemsRecoveryTagsSchema } from "../../src/db/migrations/105_queue_items_recovery_tags.js";
 import { resumeRotationSchema } from "../../src/db/migrations/101_claude_resume_rotation.js";
 import { rigNonInterruptiveSchema } from "../../src/db/migrations/095_rig_non_interruptive.js";
 import { sessionRenewalSchema } from "../../src/db/migrations/098_session_renewal.js";

@@ -5,7 +5,7 @@ import path from "node:path";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { rigInstallRootSchema } from "../src/db/migrations/096_rig_install_root.js";
+import { rigInstallRootSchema } from "../src/db/migrations/102_rig_install_root.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 
 describe("rig installation folder persistence", () => {

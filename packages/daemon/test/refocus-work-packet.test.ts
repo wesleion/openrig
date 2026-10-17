@@ -8,7 +8,7 @@ import { deriveWorkCandidates, frontmatterIntent, type WorkCandidateLookups } fr
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
-import { queueTransitionsQitemIdOrderSchema } from "../src/db/migrations/098_queue_transitions_qitem_id_order.js";
+import { queueTransitionsQitemIdOrderSchema } from "../src/db/migrations/104_queue_transitions_qitem_id_order.js";
 import { QueueTransitionLog } from "../src/domain/queue-transition-log.js";
 
 // OPR.0.7.0.12 — refocus knows the seat's work. The candidates sit beside the strict
