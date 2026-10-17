@@ -83,6 +83,7 @@ export function makeHumanReplyResolver(
   contract: HumanReplyActionPort | undefined,
 ): NonNullable<SlackWireOpts["resolveHumanReply"]> {
   return async (input) => {
+    if (queueRepo.resolveDirectHumanReply(input)) return "resolved";
     if (queueRepo.getById(input.qitemId)?.humanIntent === "update") return "not-applicable";
     if (!contract) return "not-applicable";
     try {
